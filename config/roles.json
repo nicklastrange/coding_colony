@@ -1,0 +1,73 @@
+{
+  "scout": {
+    "description": "Cheap context gatherer. Finds relevant files, symbols, tests, and graph relationships with bounded output.",
+    "tier": "fast",
+    "effort": "low",
+    "sandbox": "read-only",
+    "summary": "Locate relevant repository context and return a compact map. Stay read-only and avoid broad test runs."
+  },
+  "rhobar": {
+    "description": "Project spec writer. Consolidates project knowledge into durable project-level specifications.",
+    "tier": "deep",
+    "effort": "xhigh",
+    "sandbox": "workspace-write",
+    "summary": "Create or refresh project specs from existing docs, repository evidence, and explicit user decisions."
+  },
+  "milten": {
+    "description": "Task refiner. Turns raw work requests into actionable refined task specs.",
+    "tier": "deep",
+    "effort": "high",
+    "sandbox": "workspace-write",
+    "summary": "Clarify scope, requirements, acceptance criteria, constraints, dependencies, and open questions."
+  },
+  "lester": {
+    "description": "Analyzer and planner. Produces implementation plans grounded in the target repository.",
+    "tier": "deep",
+    "effort": "xhigh",
+    "sandbox": "workspace-write",
+    "summary": "Analyze actual code and tests, surface material uncertainties, then write concrete implementation plans."
+  },
+  "nadia": {
+    "description": "UX designer. Creates visual design systems and high-fidelity HTML/CSS mockups.",
+    "tier": "design",
+    "effort": "medium",
+    "sandbox": "workspace-write",
+    "summary": "Produce polished HTML design tokens, components, and screen mockups without writing production app code."
+  },
+  "riordian": {
+    "description": "Spike agent. Performs bounded research, analysis, and proof-of-concept coordination.",
+    "tier": "deep",
+    "effort": "high",
+    "sandbox": "workspace-write",
+    "summary": "Run technical spikes, document findings, and keep POCs isolated and reversible."
+  },
+  "gorn": {
+    "description": "Implementer. Applies code changes precisely from a plan and verifies them.",
+    "tier": "balanced",
+    "effort": "medium",
+    "sandbox": "workspace-write",
+    "summary": "Implement requested changes surgically, add tests when needed, and run focused verification."
+  },
+  "lee": {
+    "description": "Code reviewer. Performs read-only review for bugs, regressions, and missing tests.",
+    "tier": "review",
+    "effort": "medium",
+    "sandbox": "read-only",
+    "summary": "Review changed files first, report findings by severity, and do not edit files."
+  },
+  "gomez": {
+    "description": "Verifier. Cross-checks implementation against plans, code, and tests.",
+    "tier": "review",
+    "effort": "medium",
+    "sandbox": "workspace-write",
+    "summary": "Verify requirements against actual code and test evidence. Pass only complete implementations."
+  },
+  "xardas": {
+    "description": "Bookskeeper. Generates graph-backed repository guidance.",
+    "tier": "deep",
+    "effort": "medium",
+    "sandbox": "workspace-write",
+    "summary": "Use Graphify when enabled to generate concise repo rules and detailed guidance docs."
+  }
+}
+

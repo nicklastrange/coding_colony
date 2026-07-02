@@ -1,0 +1,73 @@
+{
+  "codex-native": {
+    "description": "Default OpenAI Codex models for Codex-first installs.",
+    "harness_defaults": {
+      "codex": {
+        "provider_id": "openai"
+      }
+    },
+    "tiers": {
+      "fast": "gpt-5.4-mini",
+      "balanced": "gpt-5.4",
+      "deep": "gpt-5.5",
+      "design": "gpt-5.5",
+      "review": "gpt-5.4-mini"
+    }
+  },
+  "anthropic-native": {
+    "description": "Claude-native model names for Claude Code installs.",
+    "tiers": {
+      "fast": "haiku",
+      "balanced": "sonnet",
+      "deep": "opus",
+      "design": "opus",
+      "review": "sonnet"
+    }
+  },
+  "opencode-native": {
+    "description": "OpenCode model strings that can be edited to match the user's configured provider.",
+    "tiers": {
+      "fast": "github-copilot/gpt-5.4-mini",
+      "balanced": "github-copilot/claude-sonnet-4.6",
+      "deep": "github-copilot/claude-opus-4.6",
+      "design": "github-copilot/claude-opus-4.6",
+      "review": "github-copilot/gpt-5.4-mini"
+    }
+  },
+  "litellm": {
+    "description": "LiteLLM or compatible gateway. Set LITELLM_BASE_URL and LITELLM_API_KEY in .env.",
+    "base_url_env": "LITELLM_BASE_URL",
+    "default_base_url": "http://localhost:4000",
+    "api_key_env": "LITELLM_API_KEY",
+    "codex_provider": {
+      "id": "litellm",
+      "name": "LiteLLM",
+      "wire_api": "responses"
+    },
+    "tiers": {
+      "fast": "gpt-4.1-mini",
+      "balanced": "claude-sonnet-4",
+      "deep": "claude-opus-4",
+      "design": "claude-opus-4",
+      "review": "gpt-4.1-mini"
+    }
+  },
+  "openrouter": {
+    "description": "OpenRouter or compatible gateway. Set OPENROUTER_BASE_URL and OPENROUTER_API_KEY in .env.",
+    "base_url_env": "OPENROUTER_BASE_URL",
+    "default_base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "codex_provider": {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "wire_api": "responses"
+    },
+    "tiers": {
+      "fast": "openai/gpt-4.1-mini",
+      "balanced": "anthropic/claude-sonnet-4",
+      "deep": "anthropic/claude-opus-4",
+      "design": "anthropic/claude-opus-4",
+      "review": "openai/gpt-4.1-mini"
+    }
+  }
+}

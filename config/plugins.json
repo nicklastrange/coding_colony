@@ -1,0 +1,28 @@
+{
+  "graphify": {
+    "description": "Optional repository knowledge graph workflow.",
+    "command_env": "GRAPHIFY_COMMAND",
+    "mcp": false,
+    "install_command": ["pipx", "install", "graphifyy"],
+    "post_install_command": ["graphify", "install", "--platform", "{platform}"],
+    "install_description": "Install Graphify with pipx, then register it for each selected harness with graphify install --platform."
+  },
+  "context-mode": {
+    "description": "Optional context-mode MCP server.",
+    "command_env": "CONTEXT_MODE_COMMAND",
+    "mcp": true,
+    "install_command": ["npm", "install", "-g", "context-mode"],
+    "install_description": "Install context-mode globally with npm."
+  },
+  "playwright": {
+    "description": "Optional Playwright MCP server.",
+    "command_env": "PLAYWRIGHT_MCP_COMMAND",
+    "mcp": true,
+    "install_command": ["brew", "install", "playwright-mcp"],
+    "install_description": "Install Playwright MCP with Homebrew."
+  },
+  "gradle-wrapper": {
+    "description": "Optional Gradle test/check output summarizer.",
+    "mcp": false
+  }
+}

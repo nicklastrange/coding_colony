@@ -1,0 +1,187 @@
+# Agent V2 LLM Maintenance Guide
+
+This file is optimized for LLM agents maintaining this repository.
+
+## Project Summary
+
+Agent V2 is an installer and source package that generates portable agent
+workflow configurations for Codex, Claude Code, and OpenCode.
+
+The project goal is to keep one canonical set of role workflows and render it
+into each supported harness using that harness's native files and conventions.
+Installed projects should contain only runtime configuration. Source installer
+files must stay in this repository.
+
+## Core Concepts
+
+- Harness: an AI coding environment. Supported harnesses are `codex`, `claude`,
+  and `opencode`.
+- Role: a named workflow agent, such as `xardas`, `gorn`, `lester`, or `lee`.
+- Command: a slash workflow such as `/bookskeeper` or `/implement`.
+- Provider: a model provider profile from `config/providers.json`.
+- Tier: a provider-neutral model label: `fast`, `balanced`, `deep`, `design`,
+  or `review`.
+- Plugin: an optional integration from `config/plugins.json`, such as Graphify
+  or context-mode.
+- Installed setup: the generated runtime folder produced by `install.sh`.
+
+## Source Of Truth
+
+- `scripts/agent_setup.py`: installer and renderer for all generated runtime
+  files.
+- `config/roles.json`: role metadata, tier, effort, sandbox, and summary.
+- `core/role-workflows.md`: canonical role workflow bodies. Add or modify role
+  behavior here first.
+- `config/providers.json`: provider profiles and concrete model mappings.
+- `config/plugins.json`: optional integration definitions and commands.
+- `.env.example`: generated environment keys and comments.
+- `tests/test_installation_integrity.py`: regression tests for generated output.
+- `README.md`: user-facing project overview and installation guide.
+- `AGENTS.md`: repository-level rules for agents working on this source package.
+
+## Architecture Rules
+
+Keep role behavior harness-neutral. Put role workflow content in
+`core/role-workflows.md`, not directly in generated Codex, Claude, or OpenCode
+templates.
+
+Keep harness-specific logic in `scripts/agent_setup.py`. Harness-specific logic
+includes frontmatter, config format, MCP format, model resolution, plugin hooks,
+and command binding.
+
+Keep provider-specific model IDs out of role workflows and generated agent
+frontmatter where tiers are supported. Use tier names in role definitions and
+resolve concrete models through `.env` or harness config.
+
+Keep optional integrations optional. Generated prompts may say a plugin is
+enabled or disabled. Workflows that require a disabled or missing optional tool
+must report the missing dependency instead of fabricating output.
+
+Do not copy installer source files into installed projects. Runtime installs
+should not contain source `install.sh`, `scripts/agent_setup.py`, `config/**`, or
+`core/**`.
+
+## Adding A New Role
+
+1. Add the role to `config/roles.json`.
+2. Add the role name to `ROLE_ORDER` in `scripts/agent_setup.py`.
+3. Add a matching `<!-- role: name -->` block in `core/role-workflows.md`.
+4. If the role has a slash command, add it to `COMMAND_TO_ROLE` in
+   `scripts/agent_setup.py`.
+5. Update `README.md` if the role is user-facing.
+6. Add or update tests in `tests/test_installation_integrity.py`.
+7. Run `python3 -m unittest discover -s tests -v`.
+
+## Adding A New Command
+
+1. Add the command-to-role mapping to `COMMAND_TO_ROLE`.
+2. Ensure the target role has a workflow in `core/role-workflows.md`.
+3. Verify generated command files for Codex and OpenCode bind to the correct
+   role.
+4. Update README command documentation if user-facing.
+5. Add test assertions for command binding.
+
+## Adding A New Harness
+
+1. Add the harness name to `SUPPORTED_HARNESSES`.
+2. Add native provider behavior to `NATIVE_PROVIDER_BY_HARNESS`.
+3. Implement a `generate_<harness>()` function in `scripts/agent_setup.py`.
+4. Reuse `role_prompt()` so the harness receives canonical workflows.
+5. Generate native command bindings where the harness supports them.
+6. Add harness assertions to `tests/test_installation_integrity.py`.
+7. Document install usage in `README.md`.
+
+## Adding A New Provider
+
+1. Add a profile to `config/providers.json`.
+2. Provide all model tiers: `fast`, `balanced`, `deep`, `design`, and `review`.
+3. Add gateway fields when needed, such as base URL and API key env vars.
+4. Update `.env.example` when new env vars are required.
+5. Run the installer tests. They generate installs for every provider.
+
+## Adding A New Optional Plugin
+
+1. Add the plugin to `config/plugins.json`.
+2. Add `install_command` and `install_description` when the dependency can be
+   safely installed by a package manager.
+3. Add `post_install_command` when the plugin also needs per-harness
+   registration. Use `{platform}` as the selected harness placeholder.
+4. Add generated runtime wiring in `scripts/agent_setup.py` only where needed.
+5. Make prompts conditional on plugin enablement.
+6. Log plugin status through `.env` fields such as `AGENT_PLUGINS`,
+   `AGENT_OPTIONAL_DEPS`, and `AGENT_DETECTED_TOOLS`.
+7. Log install and configuration attempts through `AGENT_PLUGIN_INSTALLS`.
+8. Add integrity tests for generated config and optional behavior.
+
+## OpenCode Model Tiers
+
+OpenCode agent frontmatter should use tier names, for example `model: deep`.
+The generated `model-tier-resolver.js` plugin resolves tiers from `.env` during
+OpenCode config loading.
+
+Do not put concrete provider IDs such as `openai/...` or `github-copilot/...`
+inside generated OpenCode agent frontmatter.
+
+Changing `.env` model values is picked up on OpenCode config reload or restart.
+Do not promise live model hot-swapping inside an already-running session unless
+OpenCode itself guarantees it.
+
+## Bookskeeper Contract
+
+`/bookskeeper` must use the `xardas` workflow.
+
+Expected repository-owned outputs are:
+
+- `graphify-out/CODE_CONVENTIONS.md`
+- `graphify-out/TESTING.md`
+- `graphify-out/BUSINESS_LOGIC.md`
+- repo-local `AGENTS.md` managed section
+
+Project-scoped docs under `AGENT_ROOT/docs/<project-slug>/` are allowed as
+supporting material, but they are not a replacement for the repo-owned
+Bookskeeper outputs.
+
+## Testing
+
+Run this after generator, provider, harness, role, command, or plugin changes:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Also run Python compile checks after editing installer code:
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/agent-v2-oss-pycache python3 -m py_compile scripts/agent_setup.py tests/test_installation_integrity.py
+```
+
+For generated OpenCode JavaScript plugins, run `node --check` on the generated
+plugin file in a temporary install or target install.
+
+## Common Failure Modes
+
+- Generated agents contain summaries but not real workflows: check
+  `core/role-workflows.md` parsing and `role_prompt()` usage.
+- Hardcoded provider models appear in agent files: check tier rendering and
+  provider resolution.
+- Optional tools are assumed when disabled: check plugin-conditional prompt
+  text and generated `.env` fields.
+- Missing optional tools are enabled but never installed: check
+  `install_command`, `--install-missing-plugins`, interactive install prompts,
+  and `AGENT_PLUGIN_INSTALLS`.
+- Graphify is installed but not operational in a harness: check
+  `post_install_command` and verify `graphify install --platform <harness>` was
+  run for each selected harness.
+- Installed folders contain source installer files: check copy/generation logic.
+- OpenCode command delegates to the right agent but uses the wrong model: check
+  generated tier frontmatter, `.env` model values, and `model-tier-resolver.js`.
+
+## Maintenance Principles
+
+- Prefer one canonical source and harness-specific renderers over duplicated
+  workflow text.
+- Keep README user-facing. Put maintainer details in this file.
+- Keep tests focused on generated output integrity.
+- Preserve user edits in installed `.env` when reinstalling without an explicit
+  provider.
+- Avoid broad rewrites. Generator changes should be small and covered by tests.
