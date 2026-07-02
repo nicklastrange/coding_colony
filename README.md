@@ -1,6 +1,6 @@
-# Agent V2
+# Coding Colony
 
-Agent V2 is a portable set of AI development workflows for teams and solo
+Coding Colony is a portable set of AI development workflows for teams and solo
 developers who use Codex, Claude Code, or OpenCode.
 
 It gives each harness the same high-level commands for planning, design,
