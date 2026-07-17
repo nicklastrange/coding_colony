@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -101,8 +102,9 @@ class InstallationIntegrityTests(unittest.TestCase):
                     self.assertEqual(env[f"AGENT_MODEL_{tier.upper()}"], model)
                 self.assertEqual(env["AGENT_MODEL_DEFAULT"], provider["default_model"])
 
-                models = json.loads((agent_root / ".agent-v2" / "models.json").read_text(encoding="utf-8"))
+                models = json.loads((agent_root / ".config" / "models.json").read_text(encoding="utf-8"))
                 self.assertEqual(models, {"provider": provider_name, "default": provider["default_model"], "tiers": provider["tiers"]})
+                self.assertFalse((agent_root / ".agent-v2").exists())
 
                 self.assertFalse((agent_root / "install.sh").exists())
                 self.assertFalse((agent_root / "scripts").exists())
@@ -156,6 +158,75 @@ class InstallationIntegrityTests(unittest.TestCase):
         config = json.loads((agent_root / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
         self.assertEqual(config["mcp"]["context-mode"]["command"], ["context-mode"])
         self.assertEqual(config["mcp"]["playwright"]["command"], ["playwright-mcp"])
+
+    def test_profiles_and_path_cli_are_generated(self) -> None:
+        agent_root = self.install(
+            "--harness",
+            "codex,opencode",
+            "--plugin",
+            "gradle-wrapper",
+        )
+
+        codex_env = read_env(agent_root / "codex.env")
+        opencode_env = read_env(agent_root / "opencode.env")
+        self.assertEqual(codex_env["AGENT_HARNESSES"], "codex")
+        self.assertEqual(codex_env["AGENT_PROVIDER"], "codex-native")
+        self.assertEqual(codex_env["AGENT_MODEL_DEFAULT"], self.providers["codex-native"]["default_model"])
+        self.assertEqual(opencode_env["AGENT_HARNESSES"], "opencode")
+        self.assertEqual(opencode_env["AGENT_PROVIDER"], "opencode-native")
+        self.assertEqual(opencode_env["AGENT_MODEL_DEFAULT"], self.providers["opencode-native"]["default_model"])
+
+        cli = agent_root / ".config" / "bin" / "coding-colony"
+        self.assertTrue(cli.is_file())
+        self.assertTrue(cli.stat().st_mode & 0o111)
+        self.assertIn("AGENT_TARGET_REPO", cli.read_text(encoding="utf-8"))
+
+    def test_path_entry_is_added_once(self) -> None:
+        spec = importlib.util.spec_from_file_location("agent_setup_for_test", INSTALLER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            startup_file = root / ".zshrc"
+            agent_root = root / "agent"
+            module.add_coding_colony_to_path(agent_root, startup_file)
+            module.add_coding_colony_to_path(agent_root, startup_file)
+
+            content = startup_file.read_text(encoding="utf-8")
+            self.assertEqual(content.count("# Added by agent-v2: coding-colony"), 1)
+            self.assertEqual(content.count("export PATH="), 1)
+
+    def test_gradle_hook_uses_target_cwd_from_tool_event(self) -> None:
+        agent_root = self.install(
+            "--harness",
+            "codex",
+            "--plugin",
+            "gradle-wrapper",
+        )
+        target_repo = agent_root.parent / "target-repo"
+        target_repo.mkdir()
+        hook = agent_root / ".codex" / "hooks" / "pre_tool_use_policy.py"
+
+        result = subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=agent_root,
+            input=json.dumps({
+                "cwd": str(agent_root),
+                "tool_input": {"command": "./gradlew test"},
+            }),
+            check=True,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "AGENT_TARGET_REPO": str(target_repo)},
+        )
+
+        output = json.loads(result.stdout)
+        updated = output["hookSpecificOutput"]["updatedInput"]["command"]
+        self.assertTrue(updated.endswith(f"{target_repo} test"))
+        self.assertNotIn(f" {agent_root} test", updated)
 
     def test_reinstall_preserves_existing_model_env_overrides_without_explicit_provider(self) -> None:
         agent_root = self.install("--harness", "codex")

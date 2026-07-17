@@ -76,6 +76,25 @@ After installation, review the generated `.env`. It contains the workspace root,
 enabled harnesses, provider profile, model tier mappings, and optional tool
 status.
 
+The installer also writes one profile per selected harness (`codex.env`,
+`claude.env`, or `opencode.env`) and a `coding-colony` launcher. Add the
+Interactive installs ask whether to add the launcher directory to your shell's
+startup file. Use `--no-path-prompt` to skip that question. You can also add it
+manually to `PATH` to start a harness from a target repository:
+
+```bash
+export PATH="/path/to/agent-setup/.config/bin:$PATH"
+cd /path/to/target-repository
+coding-colony codex --yolo
+```
+
+Open a new shell or source the updated startup file after accepting the PATH
+prompt.
+
+Use `--repo PATH` when launching from another directory. The launcher activates
+the selected profile and passes the target repository to generated Gradle
+redirects.
+
 `AGENT_MODEL_DEFAULT` controls the main/default Codex agent independently from
 the role tiers. `AGENT_MODEL_FAST`, `AGENT_MODEL_BALANCED`, `AGENT_MODEL_DEEP`,
 `AGENT_MODEL_DESIGN`, and `AGENT_MODEL_REVIEW` control the specialized agents.
@@ -215,7 +234,8 @@ Installed setups may contain:
 - `CLAUDE.md`
 - `.env`
 - `.envrc`
-- `.agent-v2/**`
+- `.config/**`
+- `codex.env`, `claude.env`, `opencode.env`
 - `docs/**`
 
 Installed setups should not receive source files such as `install.sh`,

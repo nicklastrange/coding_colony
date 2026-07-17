@@ -28,7 +28,7 @@ files must stay in this repository.
 ## Source Of Truth
 
 - `scripts/agent_setup.py`: installer and renderer for all generated runtime
-  files.
+  files, including harness profiles and the `coding-colony` launcher.
 - `config/roles.json`: role metadata, tier, effort, sandbox, and summary.
 - `core/role-workflows.md`: canonical role workflow bodies. Add or modify role
   behavior here first.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -170,6 +171,36 @@ def env_content(
         if key not in seen:
             lines.append(f"{key}={value}")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def profile_env_content(
+    agent_root: Path,
+    root_dir: Path,
+    harness: str,
+    provider_name: str,
+    provider: dict,
+    plugins: list[str],
+    optional_deps: dict[str, dict[str, str]],
+    existing_env: dict[str, str],
+) -> str:
+    model_tiers = model_tiers_for_provider(provider)
+    default_model = default_model_for_provider(provider)
+    for key in ("AGENT_MODEL_DEFAULT", *(f"AGENT_MODEL_{tier.upper()}" for tier in model_tiers)):
+        if existing_env.get(key):
+            if key == "AGENT_MODEL_DEFAULT":
+                default_model = existing_env[key]
+            else:
+                model_tiers[key.removeprefix("AGENT_MODEL_").lower()] = existing_env[key]
+    return env_content(
+        agent_root,
+        root_dir,
+        [harness],
+        provider_name,
+        default_model,
+        model_tiers,
+        plugins,
+        optional_deps,
+    )
 
 
 def tier_model(provider: dict, role: dict) -> str:
@@ -406,6 +437,53 @@ def prompt_yes_no(question: str, default: bool) -> bool:
         if answer in {"n", "no"}:
             return False
         print("Please answer yes or no.")
+
+
+def shell_startup_file() -> Path:
+    home = Path.home()
+    shell = Path(os.environ.get("SHELL", "")).name
+    if shell == "zsh":
+        return Path(os.environ.get("ZDOTDIR", str(home))).expanduser() / ".zshrc"
+    if shell == "bash":
+        return home / (".bash_profile" if sys.platform == "darwin" else ".bashrc")
+    return home / ".profile"
+
+
+def add_coding_colony_to_path(agent_root: Path, startup_file: Path, dry_run: bool = False) -> None:
+    bin_dir = (agent_root / ".config" / "bin").resolve()
+    if str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"coding-colony is already on PATH: {bin_dir}")
+        return
+
+    marker = "# Added by agent-v2: coding-colony"
+    export_line = f"export PATH={shlex.quote(str(bin_dir))}:$PATH"
+    existing = startup_file.read_text(encoding="utf-8") if startup_file.exists() else ""
+    if marker in existing or export_line in existing:
+        print(f"coding-colony PATH entry already exists in {startup_file}")
+        return
+    if dry_run:
+        print(f"append to {startup_file}: {export_line}")
+        return
+
+    startup_file.parent.mkdir(parents=True, exist_ok=True)
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    startup_file.write_text(
+        f"{existing}{separator}{marker}\n{export_line}\n",
+        encoding="utf-8",
+    )
+    print(f"Added coding-colony to PATH in {startup_file}")
+
+
+def maybe_add_coding_colony_to_path(agent_root: Path) -> None:
+    startup_file = shell_startup_file()
+    bin_dir = (agent_root / ".config" / "bin").resolve()
+    if str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"coding-colony is already on PATH: {bin_dir}")
+        return
+    if prompt_yes_no(f"Add coding-colony to PATH in {startup_file}?", True):
+        add_coding_colony_to_path(agent_root, startup_file)
+    else:
+        print(f"Add it manually with: export PATH={shlex.quote(str(bin_dir))}:$PATH")
 
 
 def install_command_text(plugin_def: dict) -> str:
@@ -668,12 +746,12 @@ def generate_base(
     write_file(agent_root / "AGENTS.md", render_agents_md(), dry_run)
     mkdir(agent_root / "docs", dry_run)
     write_file(
-        agent_root / ".agent-v2" / "models.json",
+        agent_root / ".config" / "models.json",
         json.dumps({"provider": provider, "default": default_model, "tiers": model_tiers}, indent=2) + "\n",
         dry_run,
     )
     write_file(
-        agent_root / ".agent-v2" / "install-manifest.json",
+        agent_root / ".config" / "install-manifest.json",
         json.dumps({
             "installer": "agent-v2-oss",
             "source": str(repo_root()),
@@ -689,9 +767,44 @@ def generate_base(
     if "gradle-wrapper" in plugins:
         copy_file(
             repo_root() / "scripts" / "run-gradle-summarized.sh",
-            agent_root / ".agent-v2" / "bin" / "run-gradle-summarized.sh",
+            agent_root / ".config" / "bin" / "run-gradle-summarized.sh",
             dry_run,
             0o755,
+        )
+    write_file(
+        agent_root / ".config" / "bin" / "coding-colony",
+        CODING_COLONY_CLI,
+        dry_run,
+        0o755,
+    )
+
+
+def generate_profiles(
+    agent_root: Path,
+    root_dir: Path,
+    harnesses: list[str],
+    explicit_provider: str | None,
+    providers: dict,
+    plugins: list[str],
+    optional_deps: dict[str, dict[str, str]],
+    dry_run: bool,
+) -> None:
+    for harness in harnesses:
+        provider_name = provider_for_harness(harness, explicit_provider)
+        existing_profile = parse_env(agent_root / f"{harness}.env")
+        write_file(
+            agent_root / f"{harness}.env",
+            profile_env_content(
+                agent_root,
+                root_dir,
+                harness,
+                provider_name,
+                providers[provider_name],
+                plugins,
+                optional_deps,
+                existing_profile,
+            ),
+            dry_run,
         )
 
 
@@ -910,6 +1023,7 @@ def generate(
     })
 
     generate_base(agent_root, root_dir, harnesses, selected_provider_label, default_model, model_tiers, plugins, optional_deps, dry_run)
+    generate_profiles(agent_root, root_dir, harnesses, explicit_provider, providers, plugins, optional_deps, dry_run)
     for harness in harnesses:
         provider_name = provider_for_harness(harness, explicit_provider)
         provider = providers[provider_name]
@@ -944,6 +1058,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--plugin", action="append", help="Optional plugin to enable. Repeat or comma-separate.")
     parser.add_argument("--no-plugin-prompt", action="store_true", help="Do not ask about optional plugins when --plugin is omitted.")
     parser.add_argument("--install-missing-plugins", action="store_true", help="Install missing optional plugin dependencies that have configured install commands.")
+    parser.add_argument("--no-path-prompt", action="store_true", help="Do not ask whether to add coding-colony to PATH.")
     parser.add_argument("--no-strict", action="store_true", help="Do not fail when an explicitly requested harness binary is missing.")
     parser.add_argument("--dry-run", action="store_true", help="Print intended writes without changing files.")
     args = parser.parse_args(argv)
@@ -969,6 +1084,8 @@ def main(argv: list[str]) -> int:
     if not args.dry_run:
         agent_root.mkdir(parents=True, exist_ok=True)
     generate(agent_root, root_dir, harnesses, args.provider, plugins, optional_deps, args.dry_run)
+    if not args.dry_run and not args.no_path_prompt and sys.stdin.isatty():
+        maybe_add_coding_colony_to_path(agent_root)
     print("Generated harnesses:", ", ".join(harnesses))
     print("Agent root:", agent_root)
     print("Root dir:", root_dir)
@@ -1064,6 +1181,7 @@ if __name__ == "__main__":
 
 PRE_TOOL_USE_POLICY_PY = r'''#!/usr/bin/env python3
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -1094,6 +1212,46 @@ def parse_gradle(command: str):
     }
 
 
+def candidate_repo(payload: dict, tool_input: dict, parsed: dict, env: dict[str, str]) -> str:
+    if parsed.get("repo_path"):
+        path = Path(parsed["repo_path"]).expanduser()
+        if not path.is_absolute():
+            base = next(
+                (
+                    value
+                    for value in (
+                        tool_input.get("cwd"),
+                        tool_input.get("workdir"),
+                        payload.get("cwd"),
+                        payload.get("workdir"),
+                        os.environ.get("AGENT_TARGET_REPO"),
+                        env.get("AGENT_TARGET_REPO"),
+                    )
+                    if value
+                ),
+                str(Path.cwd()),
+            )
+            path = Path(base).expanduser() / path
+        return str(path.resolve())
+    candidates = [
+        os.environ.get("AGENT_TARGET_REPO"),
+        env.get("AGENT_TARGET_REPO"),
+        tool_input.get("cwd"),
+        tool_input.get("workdir"),
+        payload.get("cwd"),
+        payload.get("workdir"),
+        str(Path.cwd()),
+    ]
+    for value in candidates:
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return str(path.resolve())
+    return str(Path.cwd())
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -1107,10 +1265,10 @@ def main() -> int:
     if not parsed or not re.search(r"(^|\s)(test|integrationTest|check)(\s|$)", parsed["args"]):
         return 0
     env = read_env(Path.cwd())
-    wrapper = Path(env.get("AGENT_ROOT", str(Path.cwd()))) / ".agent-v2" / "bin" / "run-gradle-summarized.sh"
+    wrapper = Path(env.get("AGENT_ROOT", str(Path.cwd()))) / ".config" / "bin" / "run-gradle-summarized.sh"
     if not wrapper.exists():
         return 0
-    repo_path = parsed["repo_path"] or tool_input.get("cwd") or tool_input.get("workdir") or str(Path.cwd())
+    repo_path = candidate_repo(payload, tool_input, parsed, env)
     new_command = f"zsh {shlex.quote(str(wrapper))} {shlex.quote(repo_path)} {parsed['args']}"
     print(json.dumps({
         "hookSpecificOutput": {
@@ -1149,6 +1307,78 @@ export const GraphifyPlugin = async ({ directory }) => ({
 '''
 
 
+CODING_COLONY_CLI = r'''#!/usr/bin/env bash
+set -euo pipefail
+
+agent_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+usage() {
+  printf 'Usage: coding-colony <codex|claude|opencode> [--yolo] [--repo PATH] [-- harness args ...]\n' >&2
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 64
+fi
+
+harness="$1"
+shift
+yolo=false
+repo_path="$(pwd -P)"
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yolo)
+      yolo=true
+      shift
+      ;;
+    --repo)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      repo_path="$(CDPATH= cd -- "$2" && pwd -P)"
+      shift 2
+      ;;
+    --)
+      shift
+      args+=("$@")
+      break
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+case "$harness" in
+  codex|claude|opencode) ;;
+  *) usage; exit 64 ;;
+esac
+if [[ "$yolo" == true && "$harness" == claude ]]; then
+  printf '%s\n' '--yolo is supported only for codex and opencode' >&2
+  exit 64
+fi
+
+profile="$agent_root/$harness.env"
+[[ -f "$profile" ]] || { printf 'Missing profile: %s\n' "$profile" >&2; exit 1; }
+cp "$profile" "$agent_root/.env"
+export AGENT_TARGET_REPO="$repo_path"
+cd "$agent_root"
+
+case "$harness" in
+  codex)
+    [[ "$yolo" == true ]] && args+=(--yolo)
+    exec codex "${args[@]}"
+    ;;
+  opencode)
+    [[ "$yolo" == true ]] && args+=(--auto)
+    exec opencode "${args[@]}"
+    ;;
+  claude)
+    exec claude "${args[@]}"
+    ;;
+esac
+'''
+
+
 OPENCODE_GRADLE_JS = r'''// Generated optional Gradle wrapper redirect plugin.
 const MARKER = "[gradle-wrapper-redirected]";
 
@@ -1164,8 +1394,8 @@ export const GradleWrapperRedirectPlugin = async ({ directory }) => ({
     if (typeof command !== "string") return;
     const match = command.match(/(?:cd\s+(?<repo>[^&;]+?)\s*&&\s*)?\.\/gradlew\s+(?<args>.+)$/s);
     if (!match?.groups?.args || !/(^|\s)(test|integrationTest|check)(\s|$)/.test(match.groups.args)) return;
-    const repoPath = match.groups.repo?.trim().replace(/^['"]|['"]$/g, "") || output?.args?.cwd || directory;
-    const wrapper = `${directory}/.agent-v2/bin/run-gradle-summarized.sh`;
+    const repoPath = match.groups.repo?.trim().replace(/^['"]|['"]$/g, "") || process.env.AGENT_TARGET_REPO || output?.args?.cwd || directory;
+    const wrapper = `${directory}/.config/bin/run-gradle-summarized.sh`;
     output.args.command = `zsh ${shellQuote(wrapper)} ${shellQuote(repoPath)} ${match.groups.args.trim()}`;
     output.args.description = `${MARKER} ${output.args.description || "Runs Gradle via summarized wrapper"}`;
   },
