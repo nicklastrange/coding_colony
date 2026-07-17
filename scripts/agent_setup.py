@@ -132,6 +132,7 @@ def env_content(
     root_dir: Path,
     harnesses: list[str],
     provider: str,
+    default_model: str,
     model_tiers: dict[str, str],
     plugins: list[str],
     optional_deps: dict[str, dict[str, str]],
@@ -142,6 +143,7 @@ def env_content(
         "AGENT_ROOT": str(agent_root),
         "AGENT_HARNESSES": ",".join(harnesses),
         "AGENT_PROVIDER": provider,
+        "AGENT_MODEL_DEFAULT": default_model,
         "AGENT_MODEL_FAST": model_tiers["fast"],
         "AGENT_MODEL_BALANCED": model_tiers["balanced"],
         "AGENT_MODEL_DEEP": model_tiers["deep"],
@@ -182,6 +184,10 @@ def model_tiers_for_provider(provider: dict) -> dict[str, str]:
     return dict(provider["tiers"])
 
 
+def default_model_for_provider(provider: dict) -> str:
+    return provider.get("default_model", provider["tiers"]["balanced"])
+
+
 def read_role_workflows() -> dict[str, str]:
     path = repo_root() / "core" / "role-workflows.md"
     text = path.read_text(encoding="utf-8")
@@ -209,13 +215,15 @@ def read_role_workflows() -> dict[str, str]:
     return workflows
 
 
-def apply_existing_model_overrides(model_tiers: dict[str, str], existing_env: dict[str, str]) -> dict[str, str]:
+def apply_existing_model_overrides(
+    model_tiers: dict[str, str], default_model: str, existing_env: dict[str, str]
+) -> tuple[dict[str, str], str]:
     result = dict(model_tiers)
     for tier in result:
         value = existing_env.get(tier_env_name(tier))
         if value:
             result[tier] = value
-    return result
+    return result, existing_env.get("AGENT_MODEL_DEFAULT") or default_model
 
 
 def merged_model_tiers(harnesses: list[str], explicit_provider: str | None, providers: dict) -> dict[str, str]:
@@ -270,13 +278,46 @@ Repository or task arguments: $ARGUMENTS
 
 
 def codex_skill_content(command: str, role: str, workflows: dict[str, str]) -> str:
+    if role == "gorn":
+        delegation_contract = f"""Codex delegation contract: invoking `/{command}` is explicit authorization to
+delegate the complete task to the `gorn` custom agent. You are the launcher;
+`gorn` owns implementation, review coordination, remediation, and verification.
+
+When native multi-agent tools are available, spawn exactly one `gorn` agent with
+the user's full request and these command arguments: `$ARGUMENTS`. Prefer
+`send_input` or `resume_agent` when an existing `gorn` agent from this workflow
+can continue the work. Do not spawn duplicate implementation agents.
+
+Tell `gorn` to execute the workflow directly, then launch `lee` for review when
+the plan or user requests review. `gorn` must wait for Lee, apply blocker/major
+findings, and rerun the plan's verification. `gorn` may spawn `lee`, but must
+not invoke `/{command}` again or spawn another `gorn`. Wait for the existing
+`gorn` workflow to finish and report its result. Do not inspect, edit, or verify
+the target repository yourself while `gorn` is working.
+
+If native delegation is unavailable, report that `gorn` could not be spawned;
+do not silently execute the workflow as the root agent."""
+    else:
+        delegation_contract = f"""Codex delegation contract: invoking `/{command}` is explicit authorization to
+delegate the complete task to the `{role}` custom agent. You are the
+orchestrator, not the workflow owner.
+
+When native multi-agent tools are available, immediately call `spawn_agent` with
+`agent_type=\"{role}\"` and pass the user's full request, including these command
+arguments: `$ARGUMENTS`. Tell the spawned agent to execute the `{role}` workflow,
+make the requested changes, and run its focused verification. The spawned `{role}`
+agent is the leaf executor: it must not invoke `/{command}`, delegate again, or
+spawn another agent. Call `spawn_agent` exactly once, wait for that agent, then
+report its result. Do not inspect, edit, or verify the target repository
+yourself before delegation, and do not duplicate the delegated work.
+
+If native delegation is unavailable, report that `{role}` could not be spawned;
+do not silently execute the workflow as the root agent."""
     return f"""---
 description: Run /{command} through the {role} role workflow.
 ---
 
-Codex compatibility: invoking `/{command}` is explicit authorization to use the
-`{role}` role workflow. If the role agent is available, launch it as the primary
-workflow agent; otherwise execute the workflow below directly.
+{delegation_contract}
 
 {workflows[role]}
 """
@@ -616,18 +657,19 @@ def generate_base(
     root_dir: Path,
     harnesses: list[str],
     provider: str,
+    default_model: str,
     model_tiers: dict[str, str],
     plugins: list[str],
     optional_deps: dict[str, dict[str, str]],
     dry_run: bool,
 ) -> None:
-    write_file(agent_root / ".env", env_content(agent_root, root_dir, harnesses, provider, model_tiers, plugins, optional_deps), dry_run)
+    write_file(agent_root / ".env", env_content(agent_root, root_dir, harnesses, provider, default_model, model_tiers, plugins, optional_deps), dry_run)
     write_file(agent_root / ".envrc", envrc_content(), dry_run)
     write_file(agent_root / "AGENTS.md", render_agents_md(), dry_run)
     mkdir(agent_root / "docs", dry_run)
     write_file(
         agent_root / ".agent-v2" / "models.json",
-        json.dumps({"provider": provider, "tiers": model_tiers}, indent=2) + "\n",
+        json.dumps({"provider": provider, "default": default_model, "tiers": model_tiers}, indent=2) + "\n",
         dry_run,
     )
     write_file(
@@ -666,7 +708,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
     mkdir(codex_dir / "agents", dry_run)
     config_lines = [
         "# Generated by agent-v2-oss. Re-run install.sh instead of editing by hand.",
-        f"model = {toml_string(provider['tiers']['balanced'])}",
+        f"model = {toml_string(env.get('AGENT_MODEL_DEFAULT', provider.get('default_model', provider['tiers']['balanced'])))}",
         'model_reasoning_effort = "medium"',
     ]
     codex_provider = provider.get("codex_provider")
@@ -690,10 +732,11 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
         "",
         "[features]",
         "hooks = true",
+        "multi_agent = true",
         "",
         "[agents]",
-        "max_threads = 2",
-        "max_depth = 1",
+        "max_threads = 3",
+        "max_depth = 2",
     ])
     for name, server in mcp_servers(plugins, env).items():
         config_lines.extend(["", f"[mcp_servers.{name}]", f"command = {toml_string(server['command'])}"])
@@ -704,6 +747,8 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
         content = "\n".join([
             f"name = {toml_string(role_name)}",
             f"description = {toml_string(role['description'])}",
+            f"model = {toml_string(env.get(tier_env_name(role['tier']), provider['tiers'][role['tier']]))}",
+            f"model_reasoning_effort = {toml_string(role['effort'])}",
             f"sandbox_mode = {toml_string(role['sandbox'])}",
             "",
             f"developer_instructions = {toml_multiline(role_prompt(role_name, role, plugins, workflows))}",
@@ -717,7 +762,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
                 "matcher": "startup|resume|clear|compact",
                 "hooks": [{
                     "type": "command",
-                    "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/session_context.py\"",
+                    "command": "/usr/bin/python3 \"$PWD/.codex/hooks/session_context.py\"",
                     "statusMessage": "Loading generated agent context"
                 }]
             }]
@@ -728,12 +773,20 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_policy.py\"",
+                "command": "/usr/bin/python3 \"$PWD/.codex/hooks/pre_tool_use_policy.py\"",
                 "statusMessage": "Checking shell command"
             }]
         }]
     write_file(codex_dir / "hooks.json", json.dumps(hooks, indent=2) + "\n", dry_run)
-    write_file(codex_dir / "hooks" / "session_context.py", SESSION_CONTEXT_PY, dry_run, 0o755)
+    write_file(
+        codex_dir / "hooks" / "session_context.py",
+        SESSION_CONTEXT_PY.replace(
+            "__ROLE_TIER_JSON__",
+            json.dumps({name: roles[name]["tier"] for name in ROLE_ORDER}, sort_keys=True),
+        ),
+        dry_run,
+        0o755,
+    )
     if "gradle-wrapper" in plugins:
         write_file(codex_dir / "hooks" / "pre_tool_use_policy.py", PRE_TOOL_USE_POLICY_PY, dry_run, 0o755)
 
@@ -758,6 +811,7 @@ def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list
         ])
         write_file(claude_dir / "agents" / f"{role_name}.md", content, dry_run)
     settings = {
+        "model": env.get("AGENT_MODEL_DEFAULT", provider.get("default_model", provider["tiers"]["balanced"])),
         "permissions": {
             "allow": ["Bash(rg:*)", "Bash(sed:*)", "Bash(find:*)", "Bash(git status:*)"],
             "deny": ["Bash(git reset --hard:*)", "Bash(git checkout --:*)"]
@@ -793,6 +847,7 @@ def generate_opencode(agent_root: Path, provider: dict, roles: dict, plugins: li
         )
     config = {
         "$schema": "https://opencode.ai/config.json",
+        "model": env.get("AGENT_MODEL_DEFAULT", provider.get("default_model", provider["tiers"]["balanced"])),
         "mcp": {
             name: {"type": "local", "command": [server["command"]]}
             for name, server in mcp_servers(plugins, env).items()
@@ -826,14 +881,23 @@ def generate(
         raise SystemExit(f"Unknown provider profile: {explicit_provider}")
     selected_provider_label = provider_label(harnesses, explicit_provider)
     env = parse_env(agent_root / ".env")
+    default_provider_name = explicit_provider
+    if not default_provider_name:
+        default_provider_name = (
+            NATIVE_PROVIDER_BY_HARNESS[harnesses[0]]
+            if len(harnesses) == 1
+            else "codex-native"
+        )
+    default_model = default_model_for_provider(providers[default_provider_name])
     model_tiers = merged_model_tiers(harnesses, explicit_provider, providers)
     if not explicit_provider:
-        model_tiers = apply_existing_model_overrides(model_tiers, env)
+        model_tiers, default_model = apply_existing_model_overrides(model_tiers, default_model, env)
     env.update({
         "ROOT_DIR": str(root_dir),
         "AGENT_ROOT": str(agent_root),
         "AGENT_PROVIDER": selected_provider_label,
         "AGENT_HARNESSES": ",".join(harnesses),
+        "AGENT_MODEL_DEFAULT": default_model,
         "AGENT_PLUGINS": ",".join(plugins),
         "AGENT_OPTIONAL_DEPS": serialize_optional_deps(optional_deps),
         "AGENT_DETECTED_TOOLS": serialize_detected_tools(optional_deps),
@@ -845,7 +909,7 @@ def generate(
         "AGENT_MODEL_REVIEW": model_tiers["review"],
     })
 
-    generate_base(agent_root, root_dir, harnesses, selected_provider_label, model_tiers, plugins, optional_deps, dry_run)
+    generate_base(agent_root, root_dir, harnesses, selected_provider_label, default_model, model_tiers, plugins, optional_deps, dry_run)
     for harness in harnesses:
         provider_name = provider_for_harness(harness, explicit_provider)
         provider = providers[provider_name]
@@ -914,7 +978,10 @@ def main(argv: list[str]) -> int:
 SESSION_CONTEXT_PY = r'''#!/usr/bin/env python3
 import json
 from pathlib import Path
+import re
 import sys
+
+ROLE_TIER = __ROLE_TIER_JSON__
 
 
 def read_env(root: Path) -> dict[str, str]:
@@ -931,13 +998,48 @@ def read_env(root: Path) -> dict[str, str]:
     return values
 
 
+def sync_models(agent_root: Path, env: dict[str, str]) -> None:
+    """Refresh Codex's concrete model fields from the editable .env file."""
+    balanced = env.get("AGENT_MODEL_BALANCED")
+    config_path = agent_root / ".codex" / "config.toml"
+    if balanced and config_path.exists():
+        config = config_path.read_text(encoding="utf-8")
+        config = re.sub(r"^model\s*=\s*.*$", f"model = {json.dumps(env.get('AGENT_MODEL_DEFAULT', balanced))}", config, count=1, flags=re.MULTILINE)
+        config_path.write_text(config, encoding="utf-8")
+
+    agents_dir = agent_root / ".codex" / "agents"
+    for role, tier in ROLE_TIER.items():
+        model = env.get(f"AGENT_MODEL_{tier.upper()}")
+        agent_path = agents_dir / f"{role}.toml"
+        if not model or not agent_path.exists():
+            continue
+        content = agent_path.read_text(encoding="utf-8")
+        content = re.sub(r"^model\s*=\s*.*$", f"model = {json.dumps(model)}", content, count=1, flags=re.MULTILINE)
+        agent_path.write_text(content, encoding="utf-8")
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except Exception:
         payload = {}
-    event = payload.get("hook_event_name") or "SessionStart"
-    env = read_env(Path.cwd())
+    raw_event = payload.get("hook_event_name") or "SessionStart"
+    event = {
+        "session_start": "SessionStart",
+        "subagent_start": "SubagentStart",
+    }.get(str(raw_event).lower(), "SessionStart")
+    agent_root = Path.cwd()
+    env = read_env(agent_root)
+    configured_root = env.get("AGENT_ROOT")
+    if configured_root:
+        agent_root = Path(configured_root)
+        env = read_env(agent_root)
+    try:
+        sync_models(agent_root, env)
+        model_sync_status = "Model mappings refreshed from .env."
+    except Exception as error:
+        # A model refresh must never prevent Codex from starting.
+        model_sync_status = f"Model refresh skipped: {type(error).__name__}."
     context = f"""Generated agent setup context:
 - ROOT_DIR: `{env.get('ROOT_DIR', '<unset>')}`
 - AGENT_ROOT: `{env.get('AGENT_ROOT', str(Path.cwd()))}`
@@ -947,6 +1049,7 @@ def main() -> int:
 - Optional deps: `{env.get('AGENT_OPTIONAL_DEPS', '')}`
 - Detected tools: `{env.get('AGENT_DETECTED_TOOLS', '')}`
 - Plugin installs: `{env.get('AGENT_PLUGIN_INSTALLS', '')}`
+- {model_sync_status}
 - Read repo-local AGENTS.md before target-repository changes.
 - Optional Graphify workflows apply only when enabled and graphify-out/graph.json exists.
 """
@@ -1106,6 +1209,7 @@ export const ModelTierResolverPlugin = async ({ directory }) => {
   const env = readEnv(directory);
   return {
     config: async (config) => {
+      if (env.AGENT_MODEL_DEFAULT) config.model = env.AGENT_MODEL_DEFAULT;
       config.agent = config.agent || {};
       for (const [role, tier] of Object.entries(ROLE_TIER)) {
         const model = env[TIER_ENV[tier]];

@@ -20,7 +20,7 @@ files must stay in this repository.
 - Command: a slash workflow such as `/bookskeeper` or `/implement`.
 - Provider: a model provider profile from `config/providers.json`.
 - Tier: a provider-neutral model label: `fast`, `balanced`, `deep`, `design`,
-  or `review`.
+  or `review`. The root/default agent has its separate `default` model mapping.
 - Plugin: an optional integration from `config/plugins.json`, such as Graphify
   or context-mode.
 - Installed setup: the generated runtime folder produced by `install.sh`.

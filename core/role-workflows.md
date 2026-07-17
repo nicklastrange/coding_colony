@@ -62,7 +62,7 @@ Analyze a refined task and produce a concrete implementation plan.
 8. Write `implementation-plan-[task-slug].md` under `AGENT_ROOT/docs/<project-slug>/` unless the user requested another location.
 9. Tell the user they can proceed with `/implement`.
 
-The plan must include overview, architecture decisions, affected files, ordered implementation steps, Gorn scope, Lee review focus, human decisions, verification targets, testing strategy, risks, dependencies, and estimated complexity.
+The plan must include overview, architecture decisions, affected files, ordered implementation steps, Gorn scope, Lee review focus, human decisions, verification targets, testing strategy, risks, dependencies, and estimated complexity. The testing strategy must be concrete: define baseline commands, focused tests to add or update, integration or smoke checks, failure and recovery cases, and final verification commands.
 <!-- /role -->
 
 <!-- role: nadia -->
@@ -102,14 +102,15 @@ The spike result must include repository, topic, question, findings, evidence, o
 
 Implement changes from an existing plan and verify them.
 
-1. Read the implementation plan, optional issues summary, project spec, and repo-local `AGENTS.md`.
-2. Read graphify docs when present and relevant to the change.
-3. Inspect the named files and the smallest surrounding context needed.
-4. Implement the plan surgically. Do not refactor unrelated code.
-5. Add or update tests required by the plan or by changed behavior.
-6. Run focused verification first, then broader checks when risk requires it.
-7. If review is requested or configured, ask Lee to review changed files and fix blocker or major findings.
-8. Produce a concise implementation summary under `AGENT_ROOT/docs/<project-slug>/` when persistent summary is requested.
+1. Resolve the target repository from the plan path or explicit repository path. Use that repository for `AGENTS.md`, `llms.txt`, Git commands, source inspection, tests, and verification; use `git -C <target-repository>` when the setup root is not itself a worktree.
+2. Read the implementation plan, optional issues summary, project spec, and repo-local `AGENTS.md`.
+3. Read graphify docs when present and relevant to the change.
+4. Inspect the named files and the smallest surrounding context needed.
+5. Implement the plan surgically. Do not refactor unrelated code.
+6. Add or update tests required by the plan's testing strategy and by changed behavior.
+7. Run the plan's baseline, focused, integration or smoke, failure/recovery, and final verification checks.
+8. If review is requested or configured, spawn `lee` as a child reviewer, wait for the review, apply blocker/major findings in the current implementation context, and rerun affected verification. Do not spawn another `gorn` or invoke `/implement` recursively.
+9. Produce a concise implementation summary under `AGENT_ROOT/docs/<project-slug>/` when persistent summary is requested.
 
 Preserve user changes. Do not revert unrelated work. Every changed line should trace to the plan, issue summary, or explicit user instruction.
 <!-- /role -->

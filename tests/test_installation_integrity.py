@@ -99,9 +99,10 @@ class InstallationIntegrityTests(unittest.TestCase):
                 self.assertEqual(env["AGENT_HARNESSES"], ",".join(HARNESSES))
                 for tier, model in provider["tiers"].items():
                     self.assertEqual(env[f"AGENT_MODEL_{tier.upper()}"], model)
+                self.assertEqual(env["AGENT_MODEL_DEFAULT"], provider["default_model"])
 
                 models = json.loads((agent_root / ".agent-v2" / "models.json").read_text(encoding="utf-8"))
-                self.assertEqual(models, {"provider": provider_name, "tiers": provider["tiers"]})
+                self.assertEqual(models, {"provider": provider_name, "default": provider["default_model"], "tiers": provider["tiers"]})
 
                 self.assertFalse((agent_root / "install.sh").exists())
                 self.assertFalse((agent_root / "scripts").exists())
@@ -109,6 +110,12 @@ class InstallationIntegrityTests(unittest.TestCase):
                 self.assertFalse((agent_root / "core").exists())
 
                 self.assert_codex_install(agent_root, provider)
+                hooks = json.loads((agent_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+                session_command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                self.assertNotIn("git rev-parse", session_command)
+                self.assertIn("$PWD/.codex/hooks/session_context.py", session_command)
+                codex_config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
+                self.assertIn("multi_agent = true", codex_config)
                 self.assert_claude_install(agent_root, provider)
                 self.assert_opencode_install(agent_root, provider)
 
@@ -151,11 +158,11 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertEqual(config["mcp"]["playwright"]["command"], ["playwright-mcp"])
 
     def test_reinstall_preserves_existing_model_env_overrides_without_explicit_provider(self) -> None:
-        agent_root = self.install("--harness", "opencode")
+        agent_root = self.install("--harness", "codex")
         env_path = agent_root / ".env"
         env_text = env_path.read_text(encoding="utf-8")
         env_text = env_text.replace(
-            "AGENT_MODEL_DEEP=github-copilot/claude-opus-4.6",
+            "AGENT_MODEL_DEEP=gpt-5.5",
             "AGENT_MODEL_DEEP=openai/gpt-5.5",
         )
         env_path.write_text(env_text, encoding="utf-8")
@@ -171,7 +178,7 @@ class InstallationIntegrityTests(unittest.TestCase):
                 "--no-plugin-prompt",
                 "--no-strict",
                 "--harness",
-                "opencode",
+                "codex",
             ],
             cwd=REPO_ROOT,
             check=True,
@@ -181,8 +188,70 @@ class InstallationIntegrityTests(unittest.TestCase):
 
         env = read_env(env_path)
         self.assertEqual(env["AGENT_MODEL_DEEP"], "openai/gpt-5.5")
-        metadata = frontmatter(agent_root / ".opencode" / "agents" / "xardas.md")
-        self.assertEqual(metadata["model"], "deep")
+        codex_xardas = (agent_root / ".codex" / "agents" / "xardas.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "openai/gpt-5.5"', codex_xardas)
+        codex_scout = (agent_root / ".codex" / "agents" / "scout.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "gpt-5.4-mini"', codex_scout)
+
+    def test_reinstall_preserves_existing_default_model_override_without_explicit_provider(self) -> None:
+        agent_root = self.install("--harness", "codex")
+        env_path = agent_root / ".env"
+        env_path.write_text(
+            env_path.read_text(encoding="utf-8").replace(
+                "AGENT_MODEL_DEFAULT=gpt-5.4",
+                "AGENT_MODEL_DEFAULT=custom-default-model",
+            ),
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(INSTALLER),
+                "--portable",
+                str(agent_root),
+                "--root-dir",
+                str(agent_root.parent),
+                "--no-plugin-prompt",
+                "--no-strict",
+                "--harness",
+                "codex",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "custom-default-model"', config)
+
+    def test_codex_session_hook_refreshes_models_from_env(self) -> None:
+        agent_root = self.install("--harness", "codex")
+        env_path = agent_root / ".env"
+        env_text = env_path.read_text(encoding="utf-8").replace(
+            "AGENT_MODEL_DEEP=gpt-5.5",
+            "AGENT_MODEL_DEEP=dynamic-deep-model",
+        ).replace(
+            "AGENT_MODEL_DEFAULT=gpt-5.4",
+            "AGENT_MODEL_DEFAULT=dynamic-default-model",
+        )
+        env_path.write_text(env_text, encoding="utf-8")
+
+        hook = agent_root / ".codex" / "hooks" / "session_context.py"
+        subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=agent_root,
+            input=json.dumps({"hook_event_name": "session_start"}),
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+        config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "dynamic-default-model"', config)
+        xardas = (agent_root / ".codex" / "agents" / "xardas.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "dynamic-deep-model"', xardas)
 
     def test_install_missing_plugin_runs_configured_installer_and_redetects(self) -> None:
         spec = importlib.util.spec_from_file_location("agent_setup_for_test", INSTALLER)
@@ -277,25 +346,40 @@ class InstallationIntegrityTests(unittest.TestCase):
 
     def assert_codex_install(self, agent_root: Path, provider: dict) -> None:
         config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
-        self.assertIn(f'model = "{provider["tiers"]["balanced"]}"', config)
+        self.assertIn(f'model = "{provider["default_model"]}"', config)
+        self.assertIn("max_threads = 3", config)
+        self.assertIn("max_depth = 2", config)
         for role_name, role in self.roles.items():
             content = (agent_root / ".codex" / "agents" / f"{role_name}.toml").read_text(encoding="utf-8")
             self.assertIn(f"name = \"{role_name}\"", content)
+            self.assertIn(f'model = "{provider["tiers"][role["tier"]]}"', content)
+            self.assertIn(f'model_reasoning_effort = "{role["effort"]}"', content)
             self.assertIn(f"Model tier: {role['tier']}", content)
             self.assertIn("Role workflow:", content)
-            self.assert_no_provider_models_in_agent_definition(content, provider)
         xardas = (agent_root / ".codex" / "agents" / "xardas.toml").read_text(encoding="utf-8")
         self.assertIn("graphify-out/CODE_CONVENTIONS.md", xardas)
         self.assertIn("repo-local `AGENTS.md` managed section", xardas)
         for command, role in COMMAND_TO_ROLE.items():
             content = (agent_root / ".agents" / "skills" / command / "SKILL.md").read_text(encoding="utf-8")
-            self.assertIn(f"`{role}` role workflow", content)
+            self.assertIn(f"`{role}` custom agent", content)
+            if role == "gorn":
+                self.assertIn("spawn exactly one `gorn` agent", content)
+                self.assertIn("`gorn` owns implementation, review coordination, remediation, and verification", content)
+                self.assertIn("launch `lee` for review", content)
+                self.assertIn("send_input` or `resume_agent", content)
+            else:
+                self.assertIn(f'agent_type="{role}"', content)
+                self.assertIn(f"The spawned `{role}`", content)
+                self.assertIn("agent is the leaf executor", content)
+                self.assertIn("Call `spawn_agent` exactly once", content)
             self.assertNotIn("agent:", content)
         bookskeeper = (agent_root / ".agents" / "skills" / "bookskeeper" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("graphify <repo-path> --mode deep", bookskeeper)
         self.assertIn("graphify-out/BUSINESS_LOGIC.md", bookskeeper)
 
     def assert_claude_install(self, agent_root: Path, provider: dict) -> None:
+        settings = json.loads((agent_root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["model"], provider["default_model"])
         for role_name, role in self.roles.items():
             path = agent_root / ".claude" / "agents" / f"{role_name}.md"
             metadata = frontmatter(path)
@@ -308,6 +392,7 @@ class InstallationIntegrityTests(unittest.TestCase):
 
     def assert_opencode_install(self, agent_root: Path, provider: dict) -> None:
         config = json.loads((agent_root / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["model"], provider["default_model"])
         self.assertNotIn("agent", config)
         self.assertNotIn("command", config)
         self.assertIn("./plugins/model-tier-resolver.js", config["plugin"])

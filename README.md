@@ -76,6 +76,10 @@ After installation, review the generated `.env`. It contains the workspace root,
 enabled harnesses, provider profile, model tier mappings, and optional tool
 status.
 
+`AGENT_MODEL_DEFAULT` controls the main/default Codex agent independently from
+the role tiers. `AGENT_MODEL_FAST`, `AGENT_MODEL_BALANCED`, `AGENT_MODEL_DEEP`,
+`AGENT_MODEL_DESIGN`, and `AGENT_MODEL_REVIEW` control the specialized agents.
+
 If you use `direnv`, run this once from the installed directory:
 
 ```bash
@@ -148,8 +152,12 @@ LITELLM_API_KEY=...
 ```
 
 You can change concrete model IDs later by editing the `AGENT_MODEL_*` values in
-`.env`. Generated agent files should keep tier names, not provider-specific
-model names.
+`.env`. OpenCode resolves those values when its configuration reloads. Codex
+refreshes its root config and custom agent files from `.env` at SessionStart, so
+restart Codex after changing them; reinstalling is not required. The generated
+TOML contains bootstrap values because Codex requires concrete model IDs in its
+custom-agent files. Generated workflow instructions remain provider-neutral and
+continue to identify agents by tier.
 
 ## Optional Integrations
 

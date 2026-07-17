@@ -6,6 +6,7 @@
         "provider_id": "openai"
       }
     },
+    "default_model": "gpt-5.4",
     "tiers": {
       "fast": "gpt-5.4-mini",
       "balanced": "gpt-5.4",
@@ -16,6 +17,7 @@
   },
   "anthropic-native": {
     "description": "Claude-native model names for Claude Code installs.",
+    "default_model": "sonnet",
     "tiers": {
       "fast": "haiku",
       "balanced": "sonnet",
@@ -26,6 +28,7 @@
   },
   "opencode-native": {
     "description": "OpenCode model strings that can be edited to match the user's configured provider.",
+    "default_model": "github-copilot/claude-sonnet-4.6",
     "tiers": {
       "fast": "github-copilot/gpt-5.4-mini",
       "balanced": "github-copilot/claude-sonnet-4.6",
@@ -36,6 +39,7 @@
   },
   "litellm": {
     "description": "LiteLLM or compatible gateway. Set LITELLM_BASE_URL and LITELLM_API_KEY in .env.",
+    "default_model": "claude-sonnet-4",
     "base_url_env": "LITELLM_BASE_URL",
     "default_base_url": "http://localhost:4000",
     "api_key_env": "LITELLM_API_KEY",
@@ -54,6 +58,7 @@
   },
   "openrouter": {
     "description": "OpenRouter or compatible gateway. Set OPENROUTER_BASE_URL and OPENROUTER_API_KEY in .env.",
+    "default_model": "anthropic/claude-sonnet-4",
     "base_url_env": "OPENROUTER_BASE_URL",
     "default_base_url": "https://openrouter.ai/api/v1",
     "api_key_env": "OPENROUTER_API_KEY",
