@@ -13,6 +13,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = REPO_ROOT / "scripts" / "agent_setup.py"
 HARNESSES = ("codex", "claude", "opencode")
+MODEL_TIERS = ("fast", "balanced", "deep")
+DEVELOPMENT_SKILLS = {"flutter", "kotlin", "spring-boot"}
 COMMAND_TO_ROLE = {
     "spec": "rhobar",
     "refine": "milten",
@@ -44,7 +46,10 @@ def frontmatter(path: Path) -> dict[str, str]:
             break
         if ":" in line:
             key, value = line.split(":", 1)
-            data[key.strip()] = value.strip()
+            value = value.strip()
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+                value = json.loads(value)
+            data[key.strip()] = value
     return data
 
 
@@ -79,17 +84,24 @@ class InstallationIntegrityTests(unittest.TestCase):
             {"tier": "balanced", "effort": "high"},
         )
         self.assertEqual(
+            {key: self.roles["gorn"][key] for key in ("tier", "effort")},
+            {"tier": "fast", "effort": "medium"},
+        )
+        self.assertEqual(
+            {key: self.roles["lester"][key] for key in ("tier", "effort")},
+            {"tier": "deep", "effort": "max"},
+        )
+        self.assertEqual(
             {key: self.roles["xardas"][key] for key in ("tier", "effort")},
             {"tier": "balanced", "effort": "high"},
         )
         self.assertEqual(
             {key: self.roles["lee"][key] for key in ("tier", "effort", "sandbox")},
-            {"tier": "review", "effort": "high", "sandbox": "read-only"},
+            {"tier": "deep", "effort": "high", "sandbox": "read-only"},
         )
         for provider_name, provider in self.providers.items():
             with self.subTest(provider=provider_name):
-                self.assertEqual(set(provider["tiers"]), {"fast", "balanced", "deep", "review"})
-                self.assertEqual(provider["tiers"]["review"], provider["tiers"]["deep"])
+                self.assertEqual(set(provider["tiers"]), set(MODEL_TIERS))
                 self.assertTrue(provider["supported_harnesses"])
                 self.assertLessEqual(set(provider["supported_harnesses"]), set(HARNESSES))
 
@@ -110,7 +122,7 @@ class InstallationIntegrityTests(unittest.TestCase):
             *args,
         ]
         subprocess.run(command, cwd=REPO_ROOT, check=True, text=True, capture_output=True)
-        return agent_root
+        return agent_root.resolve()
 
     def test_each_provider_generates_integral_supported_harness_install(self) -> None:
         for provider_name, provider in self.providers.items():
@@ -126,13 +138,21 @@ class InstallationIntegrityTests(unittest.TestCase):
                 env = read_env(agent_root / ".env")
                 self.assertEqual(env["AGENT_PROVIDER"], provider_name)
                 self.assertEqual(env["AGENT_HARNESSES"], ",".join(harnesses))
-                for tier, model in provider["tiers"].items():
-                    self.assertEqual(env[f"AGENT_MODEL_{tier.upper()}"], model)
-                self.assertEqual(env["AGENT_MODEL_DEFAULT"], provider["default_model"])
-                self.assertNotIn("AGENT_MODEL_DESIGN", env)
+                self.assertFalse(any(key.startswith("AGENT_MODEL_") for key in env))
 
-                models = json.loads((agent_root / ".config" / "models.json").read_text(encoding="utf-8"))
-                self.assertEqual(models, {"provider": provider_name, "default": provider["default_model"], "tiers": provider["tiers"]})
+                colony = json.loads((agent_root / "coding-colony.json").read_text(encoding="utf-8"))
+                expected_models = {"default": provider["default_model"], **provider["tiers"]}
+                self.assertEqual(colony["models"], {harness: expected_models for harness in harnesses})
+                self.assertEqual(
+                    colony["agents"],
+                    {
+                        role_name: {"model": role["tier"], "reasoning": role["effort"]}
+                        for role_name, role in self.roles.items()
+                    },
+                )
+                self.assertFalse((agent_root / ".config" / "models.json").exists())
+                for harness in HARNESSES:
+                    self.assertFalse((agent_root / f"{harness}.env").exists())
                 self.assertFalse((agent_root / ".agent-v2").exists())
 
                 self.assertFalse((agent_root / "install.sh").exists())
@@ -145,7 +165,7 @@ class InstallationIntegrityTests(unittest.TestCase):
                     hooks = json.loads((agent_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
                     session_command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
                     self.assertNotIn("git rev-parse", session_command)
-                    self.assertIn("$PWD/.codex/hooks/session_context.py", session_command)
+                    self.assertIn("$CODEX_HOME/hooks/session_context.py", session_command)
                     codex_config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
                     self.assertIn("multi_agent = true", codex_config)
                 if "claude" in harnesses:
@@ -193,8 +213,12 @@ class InstallationIntegrityTests(unittest.TestCase):
                 env = read_env(agent_root / ".env")
                 self.assertEqual(env["AGENT_PROVIDER"], provider_name)
                 self.assertEqual(env["AGENT_HARNESSES"], harness)
-                for tier, model in self.providers[provider_name]["tiers"].items():
-                    self.assertEqual(env[f"AGENT_MODEL_{tier.upper()}"], model)
+                provider = self.providers[provider_name]
+                config = json.loads((agent_root / "coding-colony.json").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    config["models"][harness],
+                    {"default": provider["default_model"], **provider["tiers"]},
+                )
 
     def test_optional_plugins_are_logged_and_rendered_when_explicit(self) -> None:
         agent_root = self.install(
@@ -220,7 +244,7 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertEqual(config["mcp"]["context-mode"]["command"], ["context-mode"])
         self.assertEqual(config["mcp"]["playwright"]["command"], ["playwright-mcp"])
 
-    def test_profiles_and_path_cli_are_generated(self) -> None:
+    def test_central_config_and_path_cli_are_generated(self) -> None:
         agent_root = self.install(
             "--harness",
             ",".join(HARNESSES),
@@ -228,18 +252,15 @@ class InstallationIntegrityTests(unittest.TestCase):
             "gradle-wrapper",
         )
 
-        codex_env = read_env(agent_root / "codex.env")
-        claude_env = read_env(agent_root / "claude.env")
-        opencode_env = read_env(agent_root / "opencode.env")
-        self.assertEqual(codex_env["AGENT_HARNESSES"], "codex")
-        self.assertEqual(codex_env["AGENT_PROVIDER"], "codex-native")
-        self.assertEqual(codex_env["AGENT_MODEL_DEFAULT"], self.providers["codex-native"]["default_model"])
-        self.assertEqual(claude_env["AGENT_HARNESSES"], "claude")
-        self.assertEqual(claude_env["AGENT_PROVIDER"], "anthropic-native")
-        self.assertEqual(claude_env["AGENT_MODEL_DEFAULT"], self.providers["anthropic-native"]["default_model"])
-        self.assertEqual(opencode_env["AGENT_HARNESSES"], "opencode")
-        self.assertEqual(opencode_env["AGENT_PROVIDER"], "opencode-native")
-        self.assertEqual(opencode_env["AGENT_MODEL_DEFAULT"], self.providers["opencode-native"]["default_model"])
+        self.assertEqual((agent_root / ".env").stat().st_mode & 0o777, 0o600)
+        colony = json.loads((agent_root / "coding-colony.json").read_text(encoding="utf-8"))
+        for harness in HARNESSES:
+            provider = self.providers[f"{harness}-native" if harness != "claude" else "anthropic-native"]
+            self.assertEqual(
+                colony["models"][harness],
+                {"default": provider["default_model"], **provider["tiers"]},
+            )
+            self.assertFalse((agent_root / f"{harness}.env").exists())
         codex_config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
         self.assertIn(
             f'model = "{self.providers["codex-native"]["default_model"]}"',
@@ -254,6 +275,261 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertTrue(cli.is_file())
         self.assertTrue(cli.stat().st_mode & 0o111)
         self.assertIn("AGENT_TARGET_REPO", cli.read_text(encoding="utf-8"))
+
+    def test_cli_launches_each_harness_in_target_repo_without_mutating_shared_env(self) -> None:
+        agent_root = self.install("--harness", ",".join(HARNESSES))
+        target_repo = agent_root.parent / "Demo Project"
+        target_repo.mkdir()
+        docs_dir = agent_root / "docs" / "demo-project"
+        env_path = agent_root / ".env"
+        env_path.write_text(env_path.read_text(encoding="utf-8") + "CUSTOM_SHARED=kept\n", encoding="utf-8")
+        shared_env = env_path.read_text(encoding="utf-8")
+        colony_path = agent_root / "coding-colony.json"
+        colony = json.loads(colony_path.read_text(encoding="utf-8"))
+        for harness in HARNESSES:
+            colony["models"][harness]["default"] = f"{harness}-default"
+            colony["models"][harness]["deep"] = f"{harness}-deep"
+        colony["agents"]["gorn"] = {"model": "deep", "reasoning": "max"}
+        colony_path.write_text(json.dumps(colony, indent=2) + "\n", encoding="utf-8")
+        central_config = colony_path.read_text(encoding="utf-8")
+
+        fake_bin = agent_root.parent / "bin"
+        fake_bin.mkdir()
+        fake_harness = """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["CAPTURE"]).write_text(json.dumps({
+    "argv": sys.argv[1:],
+    "cwd": os.getcwd(),
+    "provider": os.environ.get("AGENT_PROVIDER"),
+    "shared": os.environ.get("CUSTOM_SHARED"),
+    "codex_home": os.environ.get("CODEX_HOME"),
+    "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+    "opencode_config_dir": os.environ.get("OPENCODE_CONFIG_DIR"),
+    "opencode_config_content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+    "project_slug": os.environ.get("AGENT_PROJECT_SLUG"),
+    "project_docs": os.environ.get("AGENT_PROJECT_DOCS"),
+}), encoding="utf-8")
+"""
+        for harness in HARNESSES:
+            executable = fake_bin / harness
+            executable.write_text(fake_harness, encoding="utf-8")
+            executable.chmod(0o755)
+
+        results: dict[str, dict] = {}
+        for harness in HARNESSES:
+            capture = agent_root.parent / f"{harness}.json"
+            launch_env = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                "CAPTURE": str(capture),
+                "OPENCODE_CONFIG_CONTENT": '{"theme":"dark","permission":{"bash":"ask","external_directory":{"/existing/**":"deny"}}}',
+            }
+            launch_env.pop("AGENT_PROVIDER", None)
+            launch = [
+                str(agent_root / ".config" / "bin" / "coding-colony"),
+                harness,
+                "--repo",
+                str(target_repo),
+            ]
+            if harness == "codex":
+                launch.append("--yolo")
+            launch.extend(["--", "--flag", harness])
+            subprocess.run(
+                launch,
+                cwd=REPO_ROOT,
+                check=True,
+                text=True,
+                capture_output=True,
+                env=launch_env,
+            )
+            results[harness] = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertEqual(env_path.read_text(encoding="utf-8"), shared_env)
+        self.assertEqual(colony_path.read_text(encoding="utf-8"), central_config)
+        self.assertTrue(docs_dir.is_dir())
+        for harness, result in results.items():
+            self.assertEqual(result["provider"], "native")
+            self.assertEqual(result["shared"], "kept")
+            self.assertEqual(result["cwd"], str(target_repo))
+            self.assertEqual(result["project_slug"], "demo-project")
+            self.assertEqual(result["project_docs"], str(docs_dir))
+
+        self.assertEqual(results["codex"]["codex_home"], str(agent_root / ".codex"))
+        self.assertEqual(
+            results["codex"]["argv"],
+            [
+                "-C",
+                str(target_repo),
+                "--add-dir",
+                str(docs_dir),
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--flag",
+                "codex",
+            ],
+        )
+        self.assertEqual(results["claude"]["claude_config_dir"], str(agent_root / ".claude"))
+        self.assertEqual(
+            results["claude"]["argv"],
+            ["--add-dir", str(docs_dir), "--mcp-config", str(agent_root / ".mcp.json"), "--flag", "claude"],
+        )
+        self.assertEqual(results["opencode"]["opencode_config_dir"], str(agent_root / ".opencode"))
+        inline = json.loads(results["opencode"]["opencode_config_content"])
+        self.assertEqual(inline["theme"], "dark")
+        permission = inline["permission"]
+        self.assertEqual(permission["bash"], "ask")
+        self.assertEqual(permission["external_directory"]["/existing/**"], "deny")
+        self.assertEqual(permission["external_directory"][f"{docs_dir}/**"], "allow")
+
+        codex_config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "codex-default"', codex_config)
+        codex_gorn = (agent_root / ".codex" / "agents" / "gorn.toml").read_text(encoding="utf-8")
+        self.assertIn('model = "codex-deep"', codex_gorn)
+        self.assertIn('model_reasoning_effort = "max"', codex_gorn)
+        claude_settings = json.loads((agent_root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(claude_settings["model"], "claude-default")
+        claude_gorn = frontmatter(agent_root / ".claude" / "agents" / "gorn.md")
+        self.assertEqual(claude_gorn["model"], "claude-deep")
+        self.assertEqual(claude_gorn["effort"], "max")
+        opencode_config = json.loads((agent_root / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
+        self.assertEqual(opencode_config["model"], "opencode-default")
+        opencode_gorn = frontmatter(agent_root / ".opencode" / "agents" / "gorn.md")
+        self.assertEqual(opencode_gorn["model"], "opencode-deep")
+        self.assertEqual(opencode_gorn["variant"], "max")
+
+    def test_launcher_separates_same_named_nested_repositories(self) -> None:
+        agent_root = self.install("--harness", "opencode")
+        legacy_docs = agent_root / "docs" / "service"
+        legacy_docs.mkdir()
+        legacy_spec = legacy_docs / "project-spec.md"
+        legacy_spec.write_text("legacy project knowledge\n", encoding="utf-8")
+        repositories = [
+            agent_root.parent / "team-a" / "service",
+            agent_root.parent / "team-b" / "service",
+        ]
+        repositories[0].mkdir(parents=True)
+        (repositories[0] / ".git").mkdir()
+
+        fake_bin = agent_root.parent / "bin"
+        fake_bin.mkdir()
+        executable = fake_bin / "opencode"
+        executable.write_text(
+            "#!/usr/bin/env python3\nimport os\nprint(os.environ['AGENT_PROJECT_DOCS'])\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        launch_env = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+
+        docs = []
+        for index, repository in enumerate(repositories):
+            if index == 1:
+                repository.mkdir(parents=True)
+                (repository / ".git").mkdir()
+            result = subprocess.run(
+                [
+                    str(agent_root / ".config" / "bin" / "coding-colony"),
+                    "opencode",
+                    "--repo",
+                    str(repository),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+                env=launch_env,
+            )
+            docs.append(Path(result.stdout.strip()))
+
+        self.assertNotEqual(docs[0], docs[1])
+        self.assertTrue(all(path.is_dir() for path in docs))
+        self.assertEqual(docs[0], legacy_docs)
+        self.assertEqual(legacy_spec.read_text(encoding="utf-8"), "legacy project knowledge\n")
+        marker = json.loads((legacy_docs / ".coding-colony-project.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker, {"repository": str(repositories[0])})
+        self.assertTrue(docs[1].name.startswith("team-b-service-"))
+
+    def test_launcher_rejects_ambiguous_unmarked_legacy_docs(self) -> None:
+        agent_root = self.install("--harness", "opencode")
+        legacy_docs = agent_root / "docs" / "service"
+        legacy_docs.mkdir()
+        repositories = [
+            agent_root.parent / "team-a" / "service",
+            agent_root.parent / "team-b" / "service",
+        ]
+        for repository in repositories:
+            repository.mkdir(parents=True)
+            (repository / ".git").mkdir()
+
+        result = subprocess.run(
+            [
+                str(agent_root / ".config" / "bin" / "coding-colony"),
+                "opencode",
+                "--repo",
+                str(repositories[0]),
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ambiguous ownership", result.stderr)
+        self.assertFalse((legacy_docs / ".coding-colony-project.json").exists())
+
+    def test_parallel_launches_never_expose_partial_runtime_config(self) -> None:
+        agent_root = self.install("--harness", "opencode")
+        target_repo = agent_root.parent / "target"
+        target_repo.mkdir()
+        colony_path = agent_root / "coding-colony.json"
+        colony = json.loads(colony_path.read_text(encoding="utf-8"))
+        for name in ("default", *MODEL_TIERS):
+            colony["models"]["opencode"][name] = f"parallel/{name}"
+        for override in colony["agents"].values():
+            override["reasoning"] = "parallel"
+        colony_path.write_text(json.dumps(colony, indent=2) + "\n", encoding="utf-8")
+
+        fake_bin = agent_root.parent / "bin"
+        fake_bin.mkdir()
+        executable = fake_bin / "opencode"
+        executable.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["OPENCODE_CONFIG_DIR"])
+json.loads((root / "opencode.json").read_text(encoding="utf-8"))
+for path in (root / "agents").glob("*.md"):
+    content = path.read_text(encoding="utf-8")
+    assert "\\nmodel: " in content and "\\nvariant: " in content
+""",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        launch_env = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+        command = [
+            str(agent_root / ".config" / "bin" / "coding-colony"),
+            "opencode",
+            "--repo",
+            str(target_repo),
+        ]
+        processes = [
+            subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=launch_env)
+            for _ in range(64)
+        ]
+        failures = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            if process.returncode:
+                failures.append((process.returncode, stdout, stderr))
+        self.assertEqual(failures, [])
 
     def test_path_entry_is_added_once(self) -> None:
         spec = importlib.util.spec_from_file_location("agent_setup_for_test", INSTALLER)
@@ -270,8 +546,29 @@ class InstallationIntegrityTests(unittest.TestCase):
             module.add_coding_colony_to_path(agent_root, startup_file)
 
             content = startup_file.read_text(encoding="utf-8")
-            self.assertEqual(content.count("# Added by agent-v2: coding-colony"), 1)
+            self.assertEqual(content.count("# Added by Coding Colony"), 1)
             self.assertEqual(content.count("export PATH="), 1)
+
+    def test_launcher_rejects_invalid_agent_config(self) -> None:
+        agent_root = self.install("--harness", "codex")
+        config_path = agent_root / "coding-colony.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["agents"]["gorn"]["model"] = "review"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                str(agent_root / ".config" / "bin" / "coding-colony"),
+                "codex",
+                "--repo",
+                str(agent_root.parent),
+            ],
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("agents.gorn.model must be fast, balanced, or deep", result.stderr)
 
     def test_gradle_hook_uses_target_cwd_from_tool_event(self) -> None:
         agent_root = self.install(
@@ -330,135 +627,58 @@ class InstallationIntegrityTests(unittest.TestCase):
             self.assertIn("RESULT=SUCCESS", result.stdout)
             self.assertIn(f"{repo}/gradlew", result.stdout)
 
-    def test_reinstall_preserves_existing_model_env_overrides_without_explicit_provider(self) -> None:
-        agent_root = self.install("--harness", "codex")
-        env_path = agent_root / ".env"
-        env_text = env_path.read_text(encoding="utf-8")
-        env_text = env_text.replace(
-            "AGENT_MODEL_DEEP=gpt-5.5",
-            "AGENT_MODEL_DEEP=openai/gpt-5.5",
-        )
-        env_path.write_text(env_text, encoding="utf-8")
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(INSTALLER),
-                "--portable",
-                str(agent_root),
-                "--root-dir",
-                str(agent_root.parent),
-                "--no-plugin-prompt",
-                "--no-strict",
-                "--harness",
-                "codex",
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-        env = read_env(env_path)
-        self.assertEqual(env["AGENT_MODEL_DEEP"], "openai/gpt-5.5")
-        self.assertEqual(read_env(agent_root / "codex.env")["AGENT_MODEL_DEEP"], "openai/gpt-5.5")
-        codex_lester = (agent_root / ".codex" / "agents" / "lester.toml").read_text(encoding="utf-8")
-        self.assertIn('model = "openai/gpt-5.5"', codex_lester)
-        codex_scout = (agent_root / ".codex" / "agents" / "scout.toml").read_text(encoding="utf-8")
-        self.assertIn('model = "gpt-5.4-mini"', codex_scout)
-
-    def test_reinstall_preserves_existing_default_model_override_without_explicit_provider(self) -> None:
-        agent_root = self.install("--harness", "codex")
-        env_path = agent_root / ".env"
-        env_path.write_text(
-            env_path.read_text(encoding="utf-8").replace(
-                "AGENT_MODEL_DEFAULT=gpt-5.4",
-                "AGENT_MODEL_DEFAULT=custom-default-model",
-            ),
-            encoding="utf-8",
-        )
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(INSTALLER),
-                "--portable",
-                str(agent_root),
-                "--root-dir",
-                str(agent_root.parent),
-                "--no-plugin-prompt",
-                "--no-strict",
-                "--harness",
-                "codex",
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-        config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
-        self.assertIn('model = "custom-default-model"', config)
-
-    def test_reinstall_renders_single_harness_profile_model_override(self) -> None:
-        agent_root = self.install("--harness", "claude")
-        profile_path = agent_root / "claude.env"
-        profile_path.write_text(
-            profile_path.read_text(encoding="utf-8").replace(
-                "AGENT_MODEL_DEEP=opus",
-                "AGENT_MODEL_DEEP=custom-opus",
-            ),
-            encoding="utf-8",
-        )
-
-        subprocess.run(
-            [
-                sys.executable,
-                str(INSTALLER),
-                "--portable",
-                str(agent_root),
-                "--root-dir",
-                str(agent_root.parent),
-                "--no-plugin-prompt",
-                "--no-strict",
-                "--harness",
-                "claude",
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-        self.assertEqual(read_env(profile_path)["AGENT_MODEL_DEEP"], "custom-opus")
-        lester = frontmatter(agent_root / ".claude" / "agents" / "lester.md")
-        self.assertEqual(lester["model"], "custom-opus")
-
     def test_reinstall_removes_only_retired_generated_artifacts(self) -> None:
         agent_root = self.install("--harness", ",".join(HARNESSES))
+        colony_path = agent_root / "coding-colony.json"
+        colony = json.loads(colony_path.read_text(encoding="utf-8"))
+        colony["models"]["codex"]["deep"] = "custom-deep"
+        colony["agents"]["gorn"]["reasoning"] = "max"
+        colony_path.write_text(json.dumps(colony, indent=2) + "\n", encoding="utf-8")
         retired = (
+            ".config/models.json",
             ".codex/agents/nadia.toml",
             ".codex/agents/riordian.toml",
+            ".codex/skills/design/SKILL.md",
+            ".codex/skills/implement-spike/SKILL.md",
+            ".codex/skills/kotlin-spring-boot/SKILL.md",
             ".agents/skills/design/SKILL.md",
             ".agents/skills/implement-spike/SKILL.md",
             ".claude/agents/nadia.md",
             ".claude/agents/riordian.md",
             ".claude/skills/design/SKILL.md",
             ".claude/skills/implement-spike/SKILL.md",
+            ".claude/skills/kotlin-spring-boot/SKILL.md",
             ".opencode/agents/nadia.md",
             ".opencode/agents/riordian.md",
             ".opencode/commands/design.md",
             ".opencode/commands/implement-spike.md",
+            ".opencode/skills/kotlin-spring-boot/SKILL.md",
+            ".opencode/plugins/model-tier-resolver.js",
+        )
+        disabled_graphify = (
+            ".codex/skills/graphify/SKILL.md",
+            ".claude/skills/graphify/SKILL.md",
+            ".opencode/skills/graphify/SKILL.md",
+            ".opencode/plugins/graphify.js",
         )
         user_files = (
+            "codex.env",
+            "claude.env",
+            "opencode.env",
             ".codex/agents/custom.toml",
-            ".agents/skills/custom/SKILL.md",
+            ".codex/skills/custom/SKILL.md",
+            ".codex/auth.json",
+            ".codex/sessions/session.jsonl",
             ".claude/agents/custom.md",
             ".claude/skills/custom/SKILL.md",
+            ".claude/history.jsonl",
+            ".claude/projects/project/session.jsonl",
             ".opencode/agents/custom.md",
             ".opencode/commands/custom.md",
+            ".opencode/session-state.json",
+            ".agents/skills/custom/SKILL.md",
         )
-        for relative_path in (*retired, *user_files):
+        for relative_path in (*retired, *disabled_graphify, *user_files):
             path = agent_root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("preserve only when user-owned\n", encoding="utf-8")
@@ -484,38 +704,14 @@ class InstallationIntegrityTests(unittest.TestCase):
 
         for relative_path in retired:
             self.assertFalse((agent_root / relative_path).exists(), relative_path)
+        for relative_path in disabled_graphify:
+            self.assertFalse((agent_root / relative_path).exists(), relative_path)
+        self.assertEqual(json.loads(colony_path.read_text(encoding="utf-8")), colony)
         for relative_path in user_files:
             self.assertEqual(
                 (agent_root / relative_path).read_text(encoding="utf-8"),
                 "preserve only when user-owned\n",
             )
-
-    def test_codex_session_hook_refreshes_models_from_env(self) -> None:
-        agent_root = self.install("--harness", "codex")
-        env_path = agent_root / ".env"
-        env_text = env_path.read_text(encoding="utf-8").replace(
-            "AGENT_MODEL_DEEP=gpt-5.5",
-            "AGENT_MODEL_DEEP=dynamic-deep-model",
-        ).replace(
-            "AGENT_MODEL_DEFAULT=gpt-5.4",
-            "AGENT_MODEL_DEFAULT=dynamic-default-model",
-        )
-        env_path.write_text(env_text, encoding="utf-8")
-
-        hook = agent_root / ".codex" / "hooks" / "session_context.py"
-        subprocess.run(
-            [sys.executable, str(hook)],
-            cwd=agent_root,
-            input=json.dumps({"hook_event_name": "session_start"}),
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-
-        config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
-        self.assertIn('model = "dynamic-default-model"', config)
-        lester = (agent_root / ".codex" / "agents" / "lester.toml").read_text(encoding="utf-8")
-        self.assertIn('model = "dynamic-deep-model"', lester)
 
     def test_install_missing_plugin_runs_configured_installer_and_redetects(self) -> None:
         spec = importlib.util.spec_from_file_location("agent_setup_for_test", INSTALLER)
@@ -574,12 +770,16 @@ class InstallationIntegrityTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         commands: list[list[str]] = []
+        environments: list[dict[str, str]] = []
+        working_directories: list[Path] = []
 
         def fake_which(command: str) -> str | None:
             return "/tmp/bin/graphify" if command == "graphify" else None
 
-        def fake_run(command: list[str], check: bool) -> object:
+        def fake_run(command: list[str], check: bool, **kwargs: object) -> object:
             commands.append(command)
+            environments.append(kwargs["env"])
+            working_directories.append(kwargs["cwd"])
             return object()
 
         original_which = module.shutil.which
@@ -590,9 +790,10 @@ class InstallationIntegrityTests(unittest.TestCase):
             optional_deps = {"graphify": {"state": "enabled", "availability": "available"}}
             module.configure_selected_plugins(
                 ["graphify"],
-                {"graphify": {"post_install_command": ["graphify", "install", "--platform", "{platform}"]}},
+                {"graphify": {"post_install_command": ["graphify", "install", "--project", "--platform", "{platform}"]}},
                 optional_deps,
                 ["opencode", "codex"],
+                Path("/tmp/coding-colony-test"),
                 dry_run=False,
             )
         finally:
@@ -602,11 +803,16 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertEqual(
             commands,
             [
-                ["graphify", "install", "--platform", "opencode"],
-                ["graphify", "install", "--platform", "codex"],
+                ["graphify", "install", "--project", "--platform", "opencode"],
+                ["graphify", "install", "--project", "--platform", "codex"],
             ],
         )
+        self.assertEqual(working_directories, [Path("/tmp/coding-colony-test")] * 2)
         self.assertEqual(optional_deps["graphify"]["configure_state"], "configured:opencode+codex")
+        for environment in environments:
+            self.assertEqual(environment["CODEX_HOME"], "/tmp/coding-colony-test/.codex")
+            self.assertEqual(environment["CLAUDE_CONFIG_DIR"], "/tmp/coding-colony-test/.claude")
+            self.assertEqual(environment["OPENCODE_CONFIG_DIR"], "/tmp/coding-colony-test/.opencode")
 
     def assert_codex_install(self, agent_root: Path, provider: dict) -> None:
         config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
@@ -625,12 +831,14 @@ class InstallationIntegrityTests(unittest.TestCase):
             self.assertIn(f'model = "{provider["tiers"][role["tier"]]}"', content)
             self.assertIn(f'model_reasoning_effort = "{role["effort"]}"', content)
             self.assertIn(f'sandbox_mode = "{role["sandbox"]}"', content)
-            self.assertIn(f"Model tier: {role['tier']}", content)
             self.assertIn("Role workflow:", content)
             self.assertIn(self.shared_instructions, content)
 
-        skill_root = agent_root / ".agents" / "skills"
-        self.assertEqual({path.name for path in skill_root.iterdir()}, set(COMMAND_TO_ROLE))
+        skill_root = agent_root / ".codex" / "skills"
+        self.assertEqual(
+            {path.name for path in skill_root.iterdir()},
+            set(COMMAND_TO_ROLE) | DEVELOPMENT_SKILLS,
+        )
         for command, role in COMMAND_TO_ROLE.items():
             path = skill_root / command / "SKILL.md"
             metadata = frontmatter(path)
@@ -653,6 +861,7 @@ class InstallationIntegrityTests(unittest.TestCase):
                     self.assertIn("is a leaf", content)
                 self.assertIn("Call `spawn_agent` exactly once", content)
             self.assertNotIn("agent:", content)
+        self.assert_development_skills(skill_root)
         self.assert_role_workflow_contracts(role_contents)
 
     def assert_claude_install(self, agent_root: Path, provider: dict) -> None:
@@ -671,7 +880,6 @@ class InstallationIntegrityTests(unittest.TestCase):
             self.assertEqual(metadata["effort"], role["effort"])
             content = path.read_text(encoding="utf-8")
             role_contents[role_name] = content
-            self.assertIn(f"Model tier: {role['tier']}", content)
             self.assertIn("Role workflow:", content)
             self.assertIn(self.shared_instructions, content)
             self.assert_no_provider_models_in_agent_definition(body_without_frontmatter(path), provider)
@@ -681,7 +889,10 @@ class InstallationIntegrityTests(unittest.TestCase):
                 self.assertIn("Edit", metadata["disallowedTools"])
 
         skill_root = agent_root / ".claude" / "skills"
-        self.assertEqual({path.name for path in skill_root.iterdir()}, set(COMMAND_TO_ROLE))
+        self.assertEqual(
+            {path.name for path in skill_root.iterdir()},
+            set(COMMAND_TO_ROLE) | DEVELOPMENT_SKILLS,
+        )
         for command, role in COMMAND_TO_ROLE.items():
             path = skill_root / command / "SKILL.md"
             metadata = frontmatter(path)
@@ -693,6 +904,7 @@ class InstallationIntegrityTests(unittest.TestCase):
             body = body_without_frontmatter(path)
             self.assertIn("$ARGUMENTS", body)
             self.assertNotIn("Role workflow:", body)
+        self.assert_development_skills(skill_root)
         self.assert_role_workflow_contracts(role_contents)
 
     def assert_opencode_install(self, agent_root: Path, provider: dict) -> None:
@@ -700,10 +912,8 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertEqual(config["model"], provider["default_model"])
         self.assertNotIn("agent", config)
         self.assertNotIn("command", config)
-        self.assertIn("./plugins/model-tier-resolver.js", config["plugin"])
-        resolver = (agent_root / ".opencode" / "plugins" / "model-tier-resolver.js").read_text(encoding="utf-8")
-        self.assertIn("AGENT_MODEL_DEEP", resolver)
-        self.assertIn("config.agent", resolver)
+        self.assertNotIn("./plugins/model-tier-resolver.js", config["plugin"])
+        self.assertFalse((agent_root / ".opencode" / "plugins" / "model-tier-resolver.js").exists())
         self.assertEqual(
             {path.stem for path in (agent_root / ".opencode" / "agents").glob("*.md")},
             set(self.roles),
@@ -712,13 +922,13 @@ class InstallationIntegrityTests(unittest.TestCase):
         for role_name, role in self.roles.items():
             path = agent_root / ".opencode" / "agents" / f"{role_name}.md"
             metadata = frontmatter(path)
-            self.assertEqual(metadata["model"], role["tier"])
+            self.assertEqual(metadata["model"], provider["tiers"][role["tier"]])
+            self.assertEqual(metadata["variant"], role["effort"])
             self.assertEqual(metadata["x-agent-tier"], role["tier"])
             self.assertEqual(metadata["mode"], "subagent")
             raw_content = path.read_text(encoding="utf-8")
             content = body_without_frontmatter(path)
             role_contents[role_name] = content
-            self.assertIn(f"Model tier: {role['tier']}", content)
             self.assertIn("Role workflow:", content)
             self.assertIn(self.shared_instructions, content)
             self.assert_no_provider_models_in_agent_definition(content, provider)
@@ -742,7 +952,33 @@ class InstallationIntegrityTests(unittest.TestCase):
             self.assertEqual(metadata["agent"], role)
             self.assertEqual(metadata["subtask"], "true")
             self.assertNotIn("model", metadata)
+        skill_root = agent_root / ".opencode" / "skills"
+        self.assertEqual({path.name for path in skill_root.iterdir()}, DEVELOPMENT_SKILLS)
+        self.assert_development_skills(skill_root)
         self.assert_role_workflow_contracts(role_contents)
+
+    def assert_development_skills(self, skill_root: Path) -> None:
+        for name in DEVELOPMENT_SKILLS:
+            source_root = REPO_ROOT / "skills" / name
+            installed_root = skill_root / name
+            source_files = {
+                path.relative_to(source_root)
+                for path in source_root.rglob("*")
+                if path.is_file()
+            }
+            installed_files = {
+                path.relative_to(installed_root)
+                for path in installed_root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(installed_files, source_files)
+            self.assertGreater(len(source_files), 1)
+            self.assertEqual(frontmatter(source_root / "SKILL.md")["name"], name)
+            for relative_path in source_files:
+                self.assertEqual(
+                    (installed_root / relative_path).read_text(encoding="utf-8"),
+                    (source_root / relative_path).read_text(encoding="utf-8"),
+                )
 
     def assert_role_workflow_contracts(self, role_contents: dict[str, str]) -> None:
         self.assertIn("READY", role_contents["milten"])
@@ -750,12 +986,18 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertIn("READY", role_contents["lester"])
         self.assertIn("BLOCKED", role_contents["lester"])
         self.assertIn("traceability", role_contents["lester"].lower())
+        self.assertIn("both `kotlin` and `spring-boot`", role_contents["lester"])
+        self.assertIn("Java Spring Boot requires only `spring-boot`", role_contents["lester"])
+        self.assertNotIn("kotlin-spring-boot", role_contents["lester"])
         self.assertIn("startup", role_contents["gorn"].lower())
         self.assertIn("bootstrap", role_contents["gorn"].lower())
+        self.assertIn("reject a plan that omitted an applicable skill", role_contents["gorn"])
         self.assertIn("startup", role_contents["gomez"].lower())
         self.assertIn("Verdict: PASS", role_contents["gomez"])
         self.assertIn("PASS", role_contents["gorn"])
         self.assertIn("repeat", role_contents["gorn"].lower())
+        self.assertIn("plan-required development skill", role_contents["lee"])
+        self.assertIn("unlisted skill", role_contents["lee"])
         self.assertIn("graphify-out/needs_update", role_contents["gorn"])
         self.assertIn("graphify-out/needs_update", role_contents["xardas"])
         self.assertIn("<graphify-command> update <repo-path>", role_contents["xardas"])

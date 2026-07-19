@@ -13,6 +13,7 @@ from typing import Iterable
 
 
 SUPPORTED_HARNESSES = ("codex", "claude", "opencode")
+MODEL_TIERS = ("fast", "balanced", "deep")
 DEFAULT_PLUGINS: tuple[str, ...] = ()
 NATIVE_PROVIDER_BY_HARNESS = {
     "codex": "codex-native",
@@ -45,6 +46,115 @@ def repo_root() -> Path:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def validate_coding_colony_config(config: dict, roles: dict) -> None:
+    if set(config) != {"models", "agents"}:
+        raise SystemExit("coding-colony.json must contain only `models` and `agents`")
+    if not isinstance(config["models"], dict) or not isinstance(config["agents"], dict):
+        raise SystemExit("coding-colony.json `models` and `agents` must be objects")
+    for harness, models in config["models"].items():
+        if harness not in SUPPORTED_HARNESSES:
+            raise SystemExit(f"coding-colony.json has unknown harness: {harness}")
+        if not isinstance(models, dict) or set(models) != {"default", *MODEL_TIERS}:
+            raise SystemExit(
+                f"coding-colony.json models.{harness} must contain default, fast, balanced, and deep"
+            )
+        if any(not isinstance(value, str) or not value.strip() for value in models.values()):
+            raise SystemExit(f"coding-colony.json models.{harness} values must be non-empty strings")
+    for role_name, override in config["agents"].items():
+        if role_name not in roles:
+            raise SystemExit(f"coding-colony.json has unknown agent: {role_name}")
+        if not isinstance(override, dict) or set(override) != {"model", "reasoning"}:
+            raise SystemExit(
+                f"coding-colony.json agents.{role_name} must contain only model and reasoning"
+            )
+        if override["model"] not in MODEL_TIERS:
+            raise SystemExit(
+                f"coding-colony.json agents.{role_name}.model must be fast, balanced, or deep"
+            )
+        if not isinstance(override["reasoning"], str) or not override["reasoning"].strip():
+            raise SystemExit(
+                f"coding-colony.json agents.{role_name}.reasoning must be a non-empty string"
+            )
+
+
+def legacy_harness_models(
+    agent_root: Path,
+    harness: str,
+    provider: dict,
+    shared_env: dict[str, str],
+    single_harness: bool,
+) -> dict[str, str]:
+    models = {"default": default_model_for_provider(provider), **model_tiers_for_provider(provider)}
+    legacy = dict(shared_env) if single_harness else {}
+    legacy.update(parse_env(agent_root / f"{harness}.env"))
+    for name in ("default", *MODEL_TIERS):
+        value = legacy.get(f"AGENT_MODEL_{name.upper()}")
+        if value:
+            models[name] = value
+    return models
+
+
+def load_coding_colony_config(
+    agent_root: Path,
+    harnesses: list[str],
+    explicit_provider: str | None,
+    providers: dict,
+    roles: dict,
+    shared_env: dict[str, str],
+    dry_run: bool,
+) -> dict:
+    path = agent_root / "coding-colony.json"
+    if path.exists():
+        try:
+            config = read_json(path)
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"Invalid coding-colony.json: {error}") from error
+        if not isinstance(config, dict):
+            raise SystemExit("coding-colony.json must contain a JSON object")
+    else:
+        config = {}
+    original = json.dumps(config, sort_keys=True)
+    models = config.setdefault("models", {})
+    agents = config.setdefault("agents", {})
+    if not isinstance(models, dict) or not isinstance(agents, dict):
+        raise SystemExit("coding-colony.json `models` and `agents` must be objects")
+    for harness in harnesses:
+        provider = providers[provider_for_harness(harness, explicit_provider)]
+        defaults = legacy_harness_models(
+            agent_root,
+            harness,
+            provider,
+            shared_env,
+            len(harnesses) == 1,
+        )
+        harness_models = models.setdefault(harness, {})
+        if not isinstance(harness_models, dict):
+            raise SystemExit(f"coding-colony.json models.{harness} must be an object")
+        for name, value in defaults.items():
+            harness_models.setdefault(name, value)
+    for role_name, role in roles.items():
+        override = agents.setdefault(role_name, {})
+        if not isinstance(override, dict):
+            raise SystemExit(f"coding-colony.json agents.{role_name} must be an object")
+        override.setdefault("model", role["tier"])
+        override.setdefault("reasoning", role["effort"])
+    validate_coding_colony_config(config, roles)
+    if not path.exists() or json.dumps(config, sort_keys=True) != original:
+        write_file(path, json.dumps(config, indent=2) + "\n", dry_run)
+    return config
+
+
+def configured_roles(roles: dict, config: dict) -> dict:
+    return {
+        name: {
+            **role,
+            "tier": config["agents"][name]["model"],
+            "effort": config["agents"][name]["reasoning"],
+        }
+        for name, role in roles.items()
+    }
 
 
 def split_csv(values: Iterable[str] | None) -> list[str]:
@@ -144,10 +254,9 @@ def env_content(
     root_dir: Path,
     harnesses: list[str],
     provider: str,
-    default_model: str,
-    model_tiers: dict[str, str],
     plugins: list[str],
     optional_deps: dict[str, dict[str, str]],
+    existing_env: dict[str, str],
 ) -> str:
     example = (repo_root() / ".env.example").read_text(encoding="utf-8")
     defaults = {
@@ -155,11 +264,6 @@ def env_content(
         "AGENT_ROOT": str(agent_root),
         "AGENT_HARNESSES": ",".join(harnesses),
         "AGENT_PROVIDER": provider,
-        "AGENT_MODEL_DEFAULT": default_model,
-        "AGENT_MODEL_FAST": model_tiers["fast"],
-        "AGENT_MODEL_BALANCED": model_tiers["balanced"],
-        "AGENT_MODEL_DEEP": model_tiers["deep"],
-        "AGENT_MODEL_REVIEW": model_tiers["review"],
         "AGENT_PLUGINS": ",".join(plugins),
         "AGENT_OPTIONAL_DEPS": serialize_optional_deps(optional_deps),
         "AGENT_DETECTED_TOOLS": serialize_detected_tools(optional_deps),
@@ -174,43 +278,19 @@ def env_content(
         key, _ = raw.split("=", 1)
         if key in defaults:
             lines.append(f"{key}={defaults[key]}")
-            seen.add(key)
+        elif key in existing_env:
+            lines.append(f"{key}={existing_env[key]}")
         else:
             lines.append(raw)
+        seen.add(key)
     for key, value in defaults.items():
         if key not in seen:
             lines.append(f"{key}={value}")
+            seen.add(key)
+    for key, value in existing_env.items():
+        if key not in seen and not key.startswith("AGENT_MODEL_"):
+            lines.append(f"{key}={value}")
     return "\n".join(lines).rstrip() + "\n"
-
-
-def profile_env_content(
-    agent_root: Path,
-    root_dir: Path,
-    harness: str,
-    provider_name: str,
-    provider: dict,
-    plugins: list[str],
-    optional_deps: dict[str, dict[str, str]],
-    existing_env: dict[str, str],
-) -> str:
-    model_tiers = model_tiers_for_provider(provider)
-    default_model = default_model_for_provider(provider)
-    for key in ("AGENT_MODEL_DEFAULT", *(f"AGENT_MODEL_{tier.upper()}" for tier in model_tiers)):
-        if existing_env.get(key):
-            if key == "AGENT_MODEL_DEFAULT":
-                default_model = existing_env[key]
-            else:
-                model_tiers[key.removeprefix("AGENT_MODEL_").lower()] = existing_env[key]
-    return env_content(
-        agent_root,
-        root_dir,
-        [harness],
-        provider_name,
-        default_model,
-        model_tiers,
-        plugins,
-        optional_deps,
-    )
 
 
 def tier_model(provider: dict, role: dict) -> str:
@@ -256,27 +336,6 @@ def read_role_workflows() -> dict[str, str]:
     return workflows
 
 
-def apply_existing_model_overrides(
-    model_tiers: dict[str, str], default_model: str, existing_env: dict[str, str]
-) -> tuple[dict[str, str], str]:
-    result = dict(model_tiers)
-    for tier in result:
-        value = existing_env.get(tier_env_name(tier))
-        if value:
-            result[tier] = value
-    return result, existing_env.get("AGENT_MODEL_DEFAULT") or default_model
-
-
-def merged_model_tiers(harnesses: list[str], explicit_provider: str | None, providers: dict) -> dict[str, str]:
-    if explicit_provider:
-        return model_tiers_for_provider(providers[explicit_provider])
-    if len(harnesses) == 1:
-        return model_tiers_for_provider(providers[NATIVE_PROVIDER_BY_HARNESS[harnesses[0]]])
-    # Multi-harness native installs use each harness's own runtime config. The
-    # shared .env gets Codex-native defaults only as a portable fallback.
-    return model_tiers_for_provider(providers["codex-native"])
-
-
 def role_prompt(role_name: str, role: dict, plugins: list[str], workflows: dict[str, str]) -> str:
     workflow = workflows.get(role_name)
     if not workflow:
@@ -291,8 +350,6 @@ def role_prompt(role_name: str, role: dict, plugins: list[str], workflows: dict[
     return f"""You are {role_name}, {role['description']}
 
 Primary responsibility: {role['summary']}
-
-Model tier: {role['tier']}
 
 Install context:
 - Enabled optional plugins: {enabled_plugins}
@@ -369,12 +426,10 @@ subtask: true
 """
 
 
-def opencode_model_tier_resolver_js(roles: dict) -> str:
-    role_tiers = {role_name: roles[role_name]["tier"] for role_name in ROLE_ORDER}
-    return OPENCODE_MODEL_TIER_RESOLVER_JS.replace(
-        "__ROLE_TIER_JSON__",
-        json.dumps(role_tiers, indent=2),
-    )
+def copy_development_skills(destination: Path, dry_run: bool) -> None:
+    for source in sorted((repo_root() / "skills").iterdir()):
+        if source.is_dir():
+            copy_tree(source, destination / source.name, dry_run)
 
 
 def detect_harness_binary(harness: str) -> bool:
@@ -460,10 +515,11 @@ def add_coding_colony_to_path(agent_root: Path, startup_file: Path, dry_run: boo
         print(f"coding-colony is already on PATH: {bin_dir}")
         return
 
-    marker = "# Added by agent-v2: coding-colony"
+    marker = "# Added by Coding Colony"
+    legacy_marker = "# Added by agent-v2: coding-colony"
     export_line = f"export PATH={shlex.quote(str(bin_dir))}:$PATH"
     existing = startup_file.read_text(encoding="utf-8") if startup_file.exists() else ""
-    if marker in existing or export_line in existing:
+    if marker in existing or legacy_marker in existing or export_line in existing:
         print(f"coding-colony PATH entry already exists in {startup_file}")
         return
     if dry_run:
@@ -545,7 +601,13 @@ def render_plugin_command(command: list[str], platform: str) -> list[str]:
     return [part.replace("{platform}", platform) for part in command]
 
 
-def configure_plugin_for_harnesses(plugin_name: str, plugin_def: dict, harnesses: list[str], dry_run: bool) -> str:
+def configure_plugin_for_harnesses(
+    plugin_name: str,
+    plugin_def: dict,
+    harnesses: list[str],
+    agent_root: Path,
+    dry_run: bool,
+) -> str:
     command_template = plugin_def.get("post_install_command")
     if not command_template:
         return "not-needed"
@@ -561,7 +623,13 @@ def configure_plugin_for_harnesses(plugin_name: str, plugin_def: dict, harnesses
             print(f"warning: command `{command[0]}` not found while configuring plugin `{plugin_name}`", file=sys.stderr)
             return "command-missing"
         try:
-            subprocess.run(command, check=True)
+            environment = dict(os.environ)
+            environment.update({
+                "CODEX_HOME": str(agent_root / ".codex"),
+                "CLAUDE_CONFIG_DIR": str(agent_root / ".claude"),
+                "OPENCODE_CONFIG_DIR": str(agent_root / ".opencode"),
+            })
+            subprocess.run(command, check=True, env=environment, cwd=agent_root)
         except subprocess.CalledProcessError as error:
             print(f"warning: failed to configure plugin `{plugin_name}` for {harness} (exit {error.returncode})", file=sys.stderr)
             return f"failed:{harness}"
@@ -575,11 +643,15 @@ def configure_selected_plugins(
     plugin_defs: dict,
     optional_deps: dict[str, dict[str, str]],
     harnesses: list[str],
+    agent_root: Path,
     dry_run: bool,
 ) -> None:
     for plugin_name in plugins:
+        if optional_deps.get(plugin_name, {}).get("availability") == "missing":
+            optional_deps.setdefault(plugin_name, {})["configure_state"] = "skipped:missing"
+            continue
         plugin_def = plugin_defs[plugin_name]
-        state = configure_plugin_for_harnesses(plugin_name, plugin_def, harnesses, dry_run)
+        state = configure_plugin_for_harnesses(plugin_name, plugin_def, harnesses, agent_root, dry_run)
         optional_deps.setdefault(plugin_name, {})["configure_state"] = state
         if state.startswith("failed:") or state == "command-missing":
             raise SystemExit(f"Failed to configure optional plugin `{plugin_name}` ({state})")
@@ -754,25 +826,24 @@ def generate_base(
     root_dir: Path,
     harnesses: list[str],
     provider: str,
-    default_model: str,
-    model_tiers: dict[str, str],
     plugins: list[str],
     optional_deps: dict[str, dict[str, str]],
+    existing_env: dict[str, str],
     dry_run: bool,
 ) -> None:
-    write_file(agent_root / ".env", env_content(agent_root, root_dir, harnesses, provider, default_model, model_tiers, plugins, optional_deps), dry_run)
+    write_file(
+        agent_root / ".env",
+        env_content(agent_root, root_dir, harnesses, provider, plugins, optional_deps, existing_env),
+        dry_run,
+        0o600,
+    )
     write_file(agent_root / ".envrc", envrc_content(), dry_run)
     write_file(agent_root / "AGENTS.md", render_agents_md(), dry_run)
     mkdir(agent_root / "docs", dry_run)
     write_file(
-        agent_root / ".config" / "models.json",
-        json.dumps({"provider": provider, "default": default_model, "tiers": model_tiers}, indent=2) + "\n",
-        dry_run,
-    )
-    write_file(
         agent_root / ".config" / "install-manifest.json",
         json.dumps({
-            "installer": "agent-v2-oss",
+            "installer": "coding-colony",
             "source": str(repo_root()),
             "root_dir": str(root_dir),
             "agent_root": str(agent_root),
@@ -792,61 +863,14 @@ def generate_base(
         )
     write_file(
         agent_root / ".config" / "bin" / "coding-colony",
-        CODING_COLONY_CLI,
+        CODING_COLONY_CLI.replace("__ROLE_NAMES_JSON__", json.dumps(list(ROLE_ORDER))),
         dry_run,
         0o755,
     )
 
 
-def generate_profiles(
-    agent_root: Path,
-    root_dir: Path,
-    harnesses: list[str],
-    explicit_provider: str | None,
-    providers: dict,
-    plugins: list[str],
-    optional_deps: dict[str, dict[str, str]],
-    shared_env: dict[str, str],
-    dry_run: bool,
-) -> dict[str, dict[str, str]]:
-    generated: dict[str, dict[str, str]] = {}
-    for harness in harnesses:
-        provider_name = provider_for_harness(harness, explicit_provider)
-        provider = providers[provider_name]
-        existing_profile = parse_env(agent_root / f"{harness}.env")
-        if len(harnesses) == 1:
-            for key in ("AGENT_MODEL_DEFAULT", *(tier_env_name(tier) for tier in provider["tiers"])):
-                tier = key.removeprefix("AGENT_MODEL_").lower()
-                provider_value = (
-                    default_model_for_provider(provider)
-                    if tier == "default"
-                    else provider["tiers"][tier]
-                )
-                if existing_profile.get(key) and existing_profile[key] != provider_value:
-                    continue
-                if shared_env.get(key):
-                    existing_profile[key] = shared_env[key]
-        content = profile_env_content(
-            agent_root,
-            root_dir,
-            harness,
-            provider_name,
-            provider,
-            plugins,
-            optional_deps,
-            existing_profile,
-        )
-        write_file(
-            agent_root / f"{harness}.env",
-            content,
-            dry_run,
-        )
-        generated[harness] = parse_env_content(content)
-    return generated
-
-
 def envrc_content() -> str:
-    return """# Generated by agent-v2-oss.
+    return """# Generated by Coding Colony.
 # Run `direnv allow` once in this directory if you want harnesses that support
 # environment substitution to read .env values automatically.
 dotenv_if_exists .env
@@ -857,7 +881,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
     codex_dir = agent_root / ".codex"
     mkdir(codex_dir / "agents", dry_run)
     config_lines = [
-        "# Generated by agent-v2-oss. Re-run install.sh instead of editing by hand.",
+        "# Generated by Coding Colony. Re-run install.sh instead of editing by hand.",
         f"model = {toml_string(env.get('AGENT_MODEL_DEFAULT', provider.get('default_model', provider['tiers']['balanced'])))}",
         'model_reasoning_effort = "medium"',
     ]
@@ -891,6 +915,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
     for name, server in mcp_servers(plugins, env).items():
         config_lines.extend(["", f"[mcp_servers.{name}]", f"command = {toml_string(server['command'])}"])
     write_file(codex_dir / "config.toml", "\n".join(config_lines) + "\n", dry_run)
+    write_file(codex_dir / "AGENTS.md", render_agents_md(), dry_run)
 
     for role_name in ROLE_ORDER:
         role = roles[role_name]
@@ -912,7 +937,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
                 "matcher": "startup|resume|clear|compact",
                 "hooks": [{
                     "type": "command",
-                    "command": "/usr/bin/python3 \"$PWD/.codex/hooks/session_context.py\"",
+                    "command": "/usr/bin/python3 \"$CODEX_HOME/hooks/session_context.py\"",
                     "statusMessage": "Loading generated agent context"
                 }]
             }]
@@ -923,26 +948,24 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": "/usr/bin/python3 \"$PWD/.codex/hooks/pre_tool_use_policy.py\"",
+                "command": "/usr/bin/python3 \"$CODEX_HOME/hooks/pre_tool_use_policy.py\"",
                 "statusMessage": "Checking shell command"
             }]
         }]
     write_file(codex_dir / "hooks.json", json.dumps(hooks, indent=2) + "\n", dry_run)
     write_file(
         codex_dir / "hooks" / "session_context.py",
-        SESSION_CONTEXT_PY.replace(
-            "__ROLE_TIER_JSON__",
-            json.dumps({name: roles[name]["tier"] for name in ROLE_ORDER}, sort_keys=True),
-        ),
+        SESSION_CONTEXT_PY,
         dry_run,
         0o755,
     )
     if "gradle-wrapper" in plugins:
         write_file(codex_dir / "hooks" / "pre_tool_use_policy.py", PRE_TOOL_USE_POLICY_PY, dry_run, 0o755)
 
-    skills_dir = agent_root / ".agents" / "skills"
+    skills_dir = codex_dir / "skills"
     for command, role in COMMAND_TO_ROLE.items():
         write_file(skills_dir / command / "SKILL.md", codex_skill_content(command, role), dry_run)
+    copy_development_skills(skills_dir, dry_run)
 
 
 def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list[str], workflows: dict[str, str], env: dict[str, str], dry_run: bool) -> None:
@@ -954,8 +977,8 @@ def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list
             "---",
             f"name: {role_name}",
             f"description: {role['description']}",
-            f"model: {env.get(tier_env_name(role['tier']), tier_model(provider, role))}",
-            f"effort: {role['effort']}",
+            f"model: {json.dumps(env.get(tier_env_name(role['tier']), tier_model(provider, role)))}",
+            f"effort: {json.dumps(role['effort'])}",
             f"x-agent-tier: {role['tier']}",
         ]
         if role["sandbox"] == "read-only":
@@ -973,6 +996,7 @@ def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list
             claude_skill_content(command, role),
             dry_run,
         )
+    copy_development_skills(claude_dir / "skills", dry_run)
     settings = {
         "model": env.get("AGENT_MODEL_DEFAULT", default_model_for_provider(provider)),
         "permissions": {
@@ -981,7 +1005,7 @@ def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list
         }
     }
     write_file(claude_dir / "settings.json", json.dumps(settings, indent=2) + "\n", dry_run)
-    write_file(agent_root / "CLAUDE.md", "Read AGENTS.md first. Role definitions live under .claude/agents/.\n", dry_run)
+    write_file(claude_dir / "CLAUDE.md", "Read the target repository's AGENTS.md first.\n", dry_run)
     write_file(agent_root / ".mcp.json", json.dumps({"mcpServers": mcp_servers(plugins, env)}, indent=2) + "\n", dry_run)
 
 
@@ -1001,7 +1025,8 @@ def generate_opencode(agent_root: Path, provider: dict, roles: dict, plugins: li
         content = "\n".join([
             "---",
             f"description: {role['description']}",
-            f"model: {role['tier']}",
+            f"model: {json.dumps(env[tier_env_name(role['tier'])])}",
+            f"variant: {json.dumps(role['effort'])}",
             f"x-agent-tier: {role['tier']}",
             "mode: subagent",
             *permissions,
@@ -1016,6 +1041,7 @@ def generate_opencode(agent_root: Path, provider: dict, roles: dict, plugins: li
             opencode_command_content(command, role),
             dry_run,
         )
+    copy_development_skills(opencode_dir / "skills", dry_run)
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": env.get("AGENT_MODEL_DEFAULT", provider.get("default_model", provider["tiers"]["balanced"])),
@@ -1023,9 +1049,8 @@ def generate_opencode(agent_root: Path, provider: dict, roles: dict, plugins: li
             name: {"type": "local", "command": [server["command"]]}
             for name, server in mcp_servers(plugins, env).items()
         },
-        "plugin": ["./plugins/model-tier-resolver.js"],
+        "plugin": [],
     }
-    write_file(opencode_dir / "plugins" / "model-tier-resolver.js", opencode_model_tier_resolver_js(roles), dry_run)
     if "graphify" in plugins:
         config["plugin"].append("./plugins/graphify.js")
         write_file(opencode_dir / "plugins" / "graphify.js", OPENCODE_GRAPHIFY_JS, dry_run)
@@ -1045,62 +1070,71 @@ def generate(
     dry_run: bool,
 ) -> None:
     providers = read_json(repo_root() / "config" / "providers.json")
-    plugin_defs = read_json(repo_root() / "config" / "plugins.json")
     roles = read_json(repo_root() / "config" / "roles.json")
     workflows = read_role_workflows()
     validate_provider_harnesses(explicit_provider, harnesses, providers)
     selected_provider_label = provider_label(harnesses, explicit_provider)
     env = parse_env(agent_root / ".env")
-    default_provider_name = explicit_provider
-    if not default_provider_name:
-        default_provider_name = (
-            NATIVE_PROVIDER_BY_HARNESS[harnesses[0]]
-            if len(harnesses) == 1
-            else "codex-native"
-        )
-    default_model = default_model_for_provider(providers[default_provider_name])
-    model_tiers = merged_model_tiers(harnesses, explicit_provider, providers)
-    if not explicit_provider:
-        model_tiers, default_model = apply_existing_model_overrides(model_tiers, default_model, env)
+    colony_config = load_coding_colony_config(
+        agent_root,
+        harnesses,
+        explicit_provider,
+        providers,
+        roles,
+        env,
+        dry_run,
+    )
+    roles = configured_roles(roles, colony_config)
     env.update({
         "ROOT_DIR": str(root_dir),
         "AGENT_ROOT": str(agent_root),
         "AGENT_PROVIDER": selected_provider_label,
         "AGENT_HARNESSES": ",".join(harnesses),
-        "AGENT_MODEL_DEFAULT": default_model,
         "AGENT_PLUGINS": ",".join(plugins),
         "AGENT_OPTIONAL_DEPS": serialize_optional_deps(optional_deps),
         "AGENT_DETECTED_TOOLS": serialize_detected_tools(optional_deps),
         "AGENT_PLUGIN_INSTALLS": serialize_plugin_installs(optional_deps),
-        "AGENT_MODEL_FAST": model_tiers["fast"],
-        "AGENT_MODEL_BALANCED": model_tiers["balanced"],
-        "AGENT_MODEL_DEEP": model_tiers["deep"],
-        "AGENT_MODEL_REVIEW": model_tiers["review"],
     })
 
     for relative_path in (
+        "CLAUDE.md",
         ".codex/agents/nadia.toml",
         ".codex/agents/riordian.toml",
+        ".codex/skills/design",
+        ".codex/skills/implement-spike",
+        ".codex/skills/kotlin-spring-boot",
         ".agents/skills/design",
         ".agents/skills/implement-spike",
         ".claude/agents/nadia.md",
         ".claude/agents/riordian.md",
         ".claude/skills/design",
         ".claude/skills/implement-spike",
+        ".claude/skills/kotlin-spring-boot",
         ".opencode/agents/nadia.md",
         ".opencode/agents/riordian.md",
         ".opencode/commands/design.md",
         ".opencode/commands/implement-spike.md",
+        ".opencode/skills/kotlin-spring-boot",
+        ".opencode/plugins/model-tier-resolver.js",
+        ".config/models.json",
+        *(f".agents/skills/{command}" for command in COMMAND_TO_ROLE),
     ):
         remove_path(agent_root / relative_path, dry_run)
 
-    generate_base(agent_root, root_dir, harnesses, selected_provider_label, default_model, model_tiers, plugins, optional_deps, dry_run)
-    profiles = generate_profiles(
+    if "graphify" not in plugins:
+        for relative_path in (
+            ".codex/skills/graphify",
+            ".claude/skills/graphify",
+            ".opencode/skills/graphify",
+            ".opencode/plugins/graphify.js",
+        ):
+            remove_path(agent_root / relative_path, dry_run)
+
+    generate_base(
         agent_root,
         root_dir,
         harnesses,
-        explicit_provider,
-        providers,
+        selected_provider_label,
         plugins,
         optional_deps,
         env,
@@ -1110,9 +1144,10 @@ def generate(
         provider_name = provider_for_harness(harness, explicit_provider)
         provider = providers[provider_name]
         harness_env = dict(env)
-        for key in ("AGENT_MODEL_DEFAULT", *(tier_env_name(tier) for tier in provider["tiers"])):
-            if profiles[harness].get(key):
-                harness_env[key] = profiles[harness][key]
+        harness_models = colony_config["models"][harness]
+        harness_env["AGENT_MODEL_DEFAULT"] = harness_models["default"]
+        for tier in MODEL_TIERS:
+            harness_env[tier_env_name(tier)] = harness_models[tier]
         if harness == "codex":
             generate_codex(agent_root, provider, roles, plugins, workflows, harness_env, dry_run)
         elif harness == "claude":
@@ -1123,7 +1158,9 @@ def generate(
 
 def resolve_install(args: argparse.Namespace) -> tuple[Path, Path]:
     if args.global_install:
-        agent_root = Path.home() / ".agent-v2"
+        preferred = Path.home() / ".coding-colony"
+        legacy = Path.home() / ".agent-v2"
+        agent_root = legacy if legacy.exists() and not preferred.exists() else preferred
         root_dir = Path(args.root_dir).expanduser().resolve() if args.root_dir else Path.home()
         return agent_root, root_dir
     if not args.portable:
@@ -1134,10 +1171,10 @@ def resolve_install(args: argparse.Namespace) -> tuple[Path, Path]:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Install or generate agent-v2-oss harness configuration.")
+    parser = argparse.ArgumentParser(description="Install or update Coding Colony.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--portable", metavar="PATH", help="Install/generate a portable setup at PATH.")
-    mode.add_argument("--global", dest="global_install", action="store_true", help="Install/generate under ~/.agent-v2.")
+    mode.add_argument("--global", dest="global_install", action="store_true", help="Install under ~/.coding-colony.")
     parser.add_argument("--root-dir", help="Workspace root containing target repositories. Defaults to parent of portable path.")
     parser.add_argument("--harness", action="append", help="Harness to generate: codex, claude, opencode. Repeat or comma-separate.")
     parser.add_argument("--provider", help="Compatible provider profile from config/providers.json. Defaults to each harness's native provider.")
@@ -1157,6 +1194,11 @@ def main(argv: list[str]) -> int:
         harnesses,
         read_json(repo_root() / "config" / "providers.json"),
     )
+    agent_root, root_dir = resolve_install(args)
+    if not args.dry_run:
+        agent_root.mkdir(parents=True, exist_ok=True)
+        for harness in harnesses:
+            (agent_root / f".{harness}").mkdir(parents=True, exist_ok=True)
     plugin_defs = read_json(repo_root() / "config" / "plugins.json")
     requested_plugins = split_csv(args.plugin)
     prompt_for_plugins = not requested_plugins and not args.no_plugin_prompt and not args.dry_run and sys.stdin.isatty()
@@ -1169,11 +1211,8 @@ def main(argv: list[str]) -> int:
         prompt_for_install,
         args.dry_run,
     )
-    if plugins and (args.install_missing_plugins or prompt_for_plugins):
-        configure_selected_plugins(plugins, plugin_defs, optional_deps, harnesses, args.dry_run)
-    agent_root, root_dir = resolve_install(args)
-    if not args.dry_run:
-        agent_root.mkdir(parents=True, exist_ok=True)
+    if plugins:
+        configure_selected_plugins(plugins, plugin_defs, optional_deps, harnesses, agent_root, args.dry_run)
     generate(agent_root, root_dir, harnesses, args.provider, plugins, optional_deps, args.dry_run)
     if not args.dry_run and not args.no_path_prompt and sys.stdin.isatty():
         maybe_add_coding_colony_to_path(agent_root)
@@ -1185,11 +1224,9 @@ def main(argv: list[str]) -> int:
 
 SESSION_CONTEXT_PY = r'''#!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
-import re
 import sys
-
-ROLE_TIER = __ROLE_TIER_JSON__
 
 
 def read_env(root: Path) -> dict[str, str]:
@@ -1206,26 +1243,6 @@ def read_env(root: Path) -> dict[str, str]:
     return values
 
 
-def sync_models(agent_root: Path, env: dict[str, str]) -> None:
-    """Refresh Codex's concrete model fields from the editable .env file."""
-    balanced = env.get("AGENT_MODEL_BALANCED")
-    config_path = agent_root / ".codex" / "config.toml"
-    if balanced and config_path.exists():
-        config = config_path.read_text(encoding="utf-8")
-        config = re.sub(r"^model\s*=\s*.*$", f"model = {json.dumps(env.get('AGENT_MODEL_DEFAULT', balanced))}", config, count=1, flags=re.MULTILINE)
-        config_path.write_text(config, encoding="utf-8")
-
-    agents_dir = agent_root / ".codex" / "agents"
-    for role, tier in ROLE_TIER.items():
-        model = env.get(f"AGENT_MODEL_{tier.upper()}")
-        agent_path = agents_dir / f"{role}.toml"
-        if not model or not agent_path.exists():
-            continue
-        content = agent_path.read_text(encoding="utf-8")
-        content = re.sub(r"^model\s*=\s*.*$", f"model = {json.dumps(model)}", content, count=1, flags=re.MULTILINE)
-        agent_path.write_text(content, encoding="utf-8")
-
-
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -1236,18 +1253,9 @@ def main() -> int:
         "session_start": "SessionStart",
         "subagent_start": "SubagentStart",
     }.get(str(raw_event).lower(), "SessionStart")
-    agent_root = Path.cwd()
+    agent_root = Path(os.environ.get("AGENT_ROOT", Path.cwd()))
     env = read_env(agent_root)
-    configured_root = env.get("AGENT_ROOT")
-    if configured_root:
-        agent_root = Path(configured_root)
-        env = read_env(agent_root)
-    try:
-        sync_models(agent_root, env)
-        model_sync_status = "Model mappings refreshed from .env."
-    except Exception as error:
-        # A model refresh must never prevent Codex from starting.
-        model_sync_status = f"Model refresh skipped: {type(error).__name__}."
+    env.update(os.environ)
     context = f"""Generated agent setup context:
 - ROOT_DIR: `{env.get('ROOT_DIR', '<unset>')}`
 - AGENT_ROOT: `{env.get('AGENT_ROOT', str(Path.cwd()))}`
@@ -1257,7 +1265,6 @@ def main() -> int:
 - Optional deps: `{env.get('AGENT_OPTIONAL_DEPS', '')}`
 - Detected tools: `{env.get('AGENT_DETECTED_TOOLS', '')}`
 - Plugin installs: `{env.get('AGENT_PLUGIN_INSTALLS', '')}`
-- {model_sync_status}
 - Read repo-local AGENTS.md before target-repository changes.
 - Optional Graphify workflows apply only when enabled and graphify-out/graph.json exists.
 """
@@ -1356,7 +1363,7 @@ def main() -> int:
     if not parsed or not re.search(r"(^|\s)(build|test|integrationTest|check)(\s|$)", parsed["args"]):
         return 0
     env = read_env(Path.cwd())
-    wrapper = Path(env.get("AGENT_ROOT", str(Path.cwd()))) / ".config" / "bin" / "run-gradle-summarized.sh"
+    wrapper = Path(os.environ.get("AGENT_ROOT") or env.get("AGENT_ROOT", str(Path.cwd()))) / ".config" / "bin" / "run-gradle-summarized.sh"
     if not wrapper.exists():
         return 0
     repo_path = candidate_repo(payload, tool_input, parsed, env)
@@ -1398,75 +1405,372 @@ export const GraphifyPlugin = async ({ directory }) => ({
 '''
 
 
-CODING_COLONY_CLI = r'''#!/usr/bin/env bash
-set -euo pipefail
+CODING_COLONY_CLI = r'''#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import time
 
-agent_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-usage() {
-  printf 'Usage: coding-colony <codex|claude|opencode> [--yolo] [--repo PATH] [-- harness args ...]\n' >&2
-}
 
-if [[ $# -lt 1 ]]; then
-  usage
-  exit 64
-fi
+HARNESSES = ("codex", "claude", "opencode")
+MODEL_TIERS = ("fast", "balanced", "deep")
+ROLE_NAMES = __ROLE_NAMES_JSON__
 
-harness="$1"
-shift
-yolo=false
-repo_path="$(pwd -P)"
-args=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --yolo)
-      yolo=true
-      shift
-      ;;
-    --repo)
-      [[ $# -ge 2 ]] || { usage; exit 64; }
-      repo_path="$(CDPATH= cd -- "$2" && pwd -P)"
-      shift 2
-      ;;
-    --)
-      shift
-      args+=("$@")
-      break
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
-  esac
-done
 
-case "$harness" in
-  codex|claude|opencode) ;;
-  *) usage; exit 64 ;;
-esac
-if [[ "$yolo" == true && "$harness" == claude ]]; then
-  printf '%s\n' '--yolo is supported only for codex and opencode' >&2
-  exit 64
-fi
+def fail(message, code=1):
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
 
-profile="$agent_root/$harness.env"
-[[ -f "$profile" ]] || { printf 'Missing profile: %s\n' "$profile" >&2; exit 1; }
-cp "$profile" "$agent_root/.env"
-export AGENT_TARGET_REPO="$repo_path"
-cd "$agent_root"
 
-case "$harness" in
-  codex)
-    [[ "$yolo" == true ]] && args+=(--yolo)
-    exec codex "${args[@]}"
-    ;;
-  opencode)
-    [[ "$yolo" == true ]] && args+=(--auto)
-    exec opencode "${args[@]}"
-    ;;
-  claude)
-    exec claude "${args[@]}"
-    ;;
-esac
+def usage(code=64):
+    stream = sys.stdout if code == 0 else sys.stderr
+    print("Usage: coding-colony <codex|claude|opencode> [--yolo] [--repo PATH] [-- harness args ...]", file=stream)
+    raise SystemExit(code)
+
+
+def parse_args(argv):
+    if not argv:
+        usage()
+    if argv[0] in {"-h", "--help"}:
+        usage(0)
+    harness, remaining = argv[0], argv[1:]
+    if harness not in HARNESSES:
+        usage()
+    repo = Path.cwd()
+    yolo = False
+    passthrough = []
+    index = 0
+    while index < len(remaining):
+        argument = remaining[index]
+        if argument == "--":
+            passthrough.extend(remaining[index + 1 :])
+            break
+        if argument == "--yolo":
+            yolo = True
+            index += 1
+            continue
+        if argument == "--repo":
+            if index + 1 >= len(remaining):
+                usage()
+            repo = Path(remaining[index + 1]).expanduser()
+            index += 2
+            continue
+        passthrough.append(argument)
+        index += 1
+    if yolo and harness == "claude":
+        fail("--yolo is supported only for codex and opencode", 64)
+    try:
+        repo = repo.resolve(strict=True)
+    except OSError as error:
+        fail(f"Invalid repository path: {error}", 64)
+    if not repo.is_dir():
+        fail(f"Repository path is not a directory: {repo}", 64)
+    return harness, repo, yolo, passthrough
+
+
+def read_env(path):
+    values = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_config(agent_root, harness):
+    path = agent_root / "coding-colony.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Invalid coding-colony.json: {error}")
+    if not isinstance(config, dict) or set(config) != {"models", "agents"}:
+        fail("coding-colony.json must contain only `models` and `agents`")
+    models = config.get("models")
+    agents = config.get("agents")
+    if not isinstance(models, dict) or harness not in models:
+        fail(f"Harness `{harness}` is not installed in coding-colony.json")
+    harness_models = models[harness]
+    if not isinstance(harness_models, dict) or set(harness_models) != {"default", *MODEL_TIERS}:
+        fail(f"coding-colony.json models.{harness} must contain default, fast, balanced, and deep")
+    if any(not isinstance(value, str) or not value.strip() for value in harness_models.values()):
+        fail(f"coding-colony.json models.{harness} values must be non-empty strings")
+    if not isinstance(agents, dict) or set(agents) != set(ROLE_NAMES):
+        fail("coding-colony.json agents must contain exactly the installed Coding Colony agents")
+    resolved = {}
+    for role, override in agents.items():
+        if not isinstance(override, dict) or set(override) != {"model", "reasoning"}:
+            fail(f"coding-colony.json agents.{role} must contain only model and reasoning")
+        tier = override["model"]
+        reasoning = override["reasoning"]
+        if tier not in MODEL_TIERS:
+            fail(f"coding-colony.json agents.{role}.model must be fast, balanced, or deep")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            fail(f"coding-colony.json agents.{role}.reasoning must be a non-empty string")
+        resolved[role] = (harness_models[tier], reasoning, tier)
+    return harness_models, resolved
+
+
+def atomic_write(path, content):
+    try:
+        if path.read_text(encoding="utf-8") == content:
+            return
+        mode = path.stat().st_mode & 0o777
+    except OSError as error:
+        fail(f"Cannot read generated runtime file {path}: {error}")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+    except OSError as error:
+        fail(f"Cannot update generated runtime file {path}: {error}")
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def replace_line(path, key, separator, value):
+    content = path.read_text(encoding="utf-8")
+    pattern = rf"(?m)^{re.escape(key)}\s*{re.escape(separator)}\s*.*$"
+    updated, count = re.subn(pattern, f"{key}{separator}{value}", content, count=1)
+    if count != 1:
+        fail(f"Generated runtime file is missing `{key}`: {path}")
+    atomic_write(path, updated)
+
+
+def update_json(path, key, value):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Invalid generated runtime config {path}: {error}")
+    data[key] = value
+    atomic_write(path, json.dumps(data, indent=2) + "\n")
+
+
+def slugify(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "project"
+
+
+def project_docs_lock(path):
+    return path.parent / f".{path.name}.coding-colony-project.lock"
+
+
+def claim_project_docs(path, repo):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"Cannot create project docs root {path.parent}: {error}")
+    marker = path / ".coding-colony-project.json"
+    payload = json.dumps({"repository": str(repo)}, indent=2) + "\n"
+    if marker.exists():
+        try:
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            fail(f"Invalid project docs identity marker {marker}: {error}")
+        return existing == {"repository": str(repo)}
+    lock = project_docs_lock(path)
+    for _ in range(100):
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            if marker.exists():
+                return claim_project_docs(path, repo)
+            time.sleep(0.01)
+        except OSError as error:
+            fail(f"Cannot claim project docs directory {path}: {error}")
+    else:
+        fail(f"Timed out waiting for project docs identity lock {lock}")
+    temporary = None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if marker.exists():
+            return claim_project_docs(path, repo)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path, prefix=".coding-colony-project.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+        temporary.chmod(0o600)
+        os.replace(temporary, marker)
+        return True
+    except OSError as error:
+        fail(f"Cannot write project docs identity marker {marker}: {error}")
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+        try:
+            lock.rmdir()
+        except FileNotFoundError:
+            pass
+
+
+def legacy_docs_are_unambiguous(root_value, repo, slug):
+    if not root_value or not (repo / ".git").exists():
+        return False
+    try:
+        root = Path(root_value).expanduser().resolve(strict=True)
+        repo.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    matches = []
+    errors = []
+    for current, directories, files in os.walk(root, onerror=errors.append):
+        if ".git" in directories or ".git" in files:
+            candidate = Path(current).resolve()
+            if slugify(candidate.name) == slug:
+                matches.append(candidate)
+                if len(matches) > 1:
+                    return False
+        directories[:] = [name for name in directories if name != ".git"]
+    return not errors and matches == [repo]
+
+
+def project_docs(agent_root, repo, environment):
+    base = slugify(repo.name)
+    docs_root = agent_root / "docs"
+    legacy = docs_root / base
+    root_value = environment.get("ROOT_DIR")
+    if root_value:
+        try:
+            relative = repo.relative_to(Path(root_value).expanduser().resolve(strict=True))
+        except (OSError, ValueError):
+            relative = None
+    else:
+        relative = None
+    if legacy.exists():
+        marker = legacy / ".coding-colony-project.json"
+        if not marker.exists() and project_docs_lock(legacy).exists():
+            if claim_project_docs(legacy, repo):
+                return legacy
+        if not marker.exists() and not legacy_docs_are_unambiguous(root_value, repo, base):
+            expected = json.dumps({"repository": str(repo)})
+            fail(
+                f"Unmarked legacy project docs have ambiguous ownership: {legacy}. "
+                f"Create {marker} with {expected} only if these docs belong to {repo}, then retry."
+            )
+        if claim_project_docs(legacy, repo):
+            return legacy
+    elif relative is not None and len(relative.parts) <= 1:
+        if claim_project_docs(legacy, repo):
+            return legacy
+    identity = relative.as_posix() if relative is not None else str(repo)
+    qualified = slugify(identity) if relative is not None else base
+    digest = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()[:12]
+    destination = docs_root / f"{qualified}-{digest}"
+    if not claim_project_docs(destination, repo):
+        fail(f"Project docs identity collision at {destination}")
+    return destination
+
+
+def sync_runtime(agent_root, harness, models, agents):
+    if harness == "codex":
+        home = agent_root / ".codex"
+        replace_line(home / "config.toml", "model", " = ", json.dumps(models["default"]))
+        for role, (model, reasoning, _tier) in agents.items():
+            path = home / "agents" / f"{role}.toml"
+            replace_line(path, "model", " = ", json.dumps(model))
+            replace_line(path, "model_reasoning_effort", " = ", json.dumps(reasoning))
+    elif harness == "claude":
+        home = agent_root / ".claude"
+        update_json(home / "settings.json", "model", models["default"])
+        for role, (model, reasoning, tier) in agents.items():
+            path = home / "agents" / f"{role}.md"
+            replace_line(path, "model", ": ", json.dumps(model))
+            replace_line(path, "effort", ": ", json.dumps(reasoning))
+            replace_line(path, "x-agent-tier", ": ", tier)
+    else:
+        home = agent_root / ".opencode"
+        update_json(home / "opencode.json", "model", models["default"])
+        for role, (model, reasoning, tier) in agents.items():
+            path = home / "agents" / f"{role}.md"
+            replace_line(path, "model", ": ", json.dumps(model))
+            replace_line(path, "variant", ": ", json.dumps(reasoning))
+            replace_line(path, "x-agent-tier", ": ", tier)
+
+
+def allow_opencode_docs(environment, docs):
+    raw = environment.get("OPENCODE_CONFIG_CONTENT", "")
+    try:
+        inline = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as error:
+        fail(f"OPENCODE_CONFIG_CONTENT must be valid JSON: {error}")
+    if not isinstance(inline, dict):
+        fail("OPENCODE_CONFIG_CONTENT must be a JSON object")
+    permission = inline.get("permission", {})
+    if isinstance(permission, str):
+        permission = {"*": permission}
+    if not isinstance(permission, dict):
+        fail("OPENCODE_CONFIG_CONTENT permission must be a string or object")
+    pattern = f"{docs}/**"
+    external = permission.get("external_directory", "ask")
+    if isinstance(external, dict):
+        external[pattern] = "allow"
+    else:
+        permission["external_directory"] = {"*": external, pattern: "allow"}
+    inline["permission"] = permission
+    environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline, separators=(",", ":"))
+
+
+def main(argv):
+    harness, repo, yolo, passthrough = parse_args(argv)
+    agent_root = Path(__file__).resolve().parents[2]
+    models, agents = load_config(agent_root, harness)
+    sync_runtime(agent_root, harness, models, agents)
+
+    environment = dict(os.environ)
+    for key, value in read_env(agent_root / ".env").items():
+        environment.setdefault(key, value)
+    docs = project_docs(agent_root, repo, environment)
+    slug = docs.name
+    environment.update({
+        "AGENT_ROOT": str(agent_root),
+        "AGENT_TARGET_REPO": str(repo),
+        "AGENT_PROJECT_SLUG": slug,
+        "AGENT_PROJECT_DOCS": str(docs),
+    })
+
+    if harness == "codex":
+        environment["CODEX_HOME"] = str(agent_root / ".codex")
+        command = ["codex", "-C", str(repo), "--add-dir", str(docs)]
+        if yolo:
+            command.append("--dangerously-bypass-approvals-and-sandbox")
+    elif harness == "claude":
+        environment["CLAUDE_CONFIG_DIR"] = str(agent_root / ".claude")
+        command = ["claude", "--add-dir", str(docs), "--mcp-config", str(agent_root / ".mcp.json")]
+    else:
+        environment["OPENCODE_CONFIG_DIR"] = str(agent_root / ".opencode")
+        allow_opencode_docs(environment, docs)
+        command = ["opencode"]
+        if yolo:
+            command.append("--auto")
+
+    os.chdir(repo)
+    try:
+        os.execvpe(command[0], [*command, *passthrough], environment)
+    except FileNotFoundError:
+        fail(f"Harness executable not found: {command[0]}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
 '''
 
 
@@ -1486,63 +1790,13 @@ export const GradleWrapperRedirectPlugin = async ({ directory }) => ({
     const match = command.match(/(?:cd\s+(?<repo>[^&;]+?)\s*&&\s*)?\.\/gradlew\s+(?<args>.+)$/s);
     if (!match?.groups?.args || !/(^|\s)(build|test|integrationTest|check)(\s|$)/.test(match.groups.args)) return;
     const repoPath = match.groups.repo?.trim().replace(/^['"]|['"]$/g, "") || process.env.AGENT_TARGET_REPO || output?.args?.cwd || directory;
-    const wrapper = `${directory}/.config/bin/run-gradle-summarized.sh`;
+    const wrapper = `${process.env.AGENT_ROOT || directory}/.config/bin/run-gradle-summarized.sh`;
     output.args.command = `zsh ${shellQuote(wrapper)} ${shellQuote(repoPath)} ${match.groups.args.trim()}`;
     output.args.description = `${MARKER} ${output.args.description || "Runs Gradle via summarized wrapper"}`;
   },
 });
 '''
 
-
-OPENCODE_MODEL_TIER_RESOLVER_JS = r'''// Generated OpenCode model tier resolver.
-// Lets agent frontmatter use model tiers such as `model: deep` while resolving
-// to concrete provider/model IDs from .env during OpenCode config loading.
-import { readFileSync } from "fs";
-import { join } from "path";
-
-const ROLE_TIER = __ROLE_TIER_JSON__;
-
-const TIER_ENV = {
-  fast: "AGENT_MODEL_FAST",
-  balanced: "AGENT_MODEL_BALANCED",
-  deep: "AGENT_MODEL_DEEP",
-  review: "AGENT_MODEL_REVIEW",
-};
-
-function readEnv(directory) {
-  const values = {};
-  try {
-    const text = readFileSync(join(directory, ".env"), "utf8");
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#") || !line.includes("=")) continue;
-      const index = line.indexOf("=");
-      values[line.slice(0, index)] = line.slice(index + 1).replace(/^['"]|['"]$/g, "");
-    }
-  } catch {
-    // Missing .env should not break OpenCode startup.
-  }
-  return values;
-}
-
-export const ModelTierResolverPlugin = async ({ directory }) => {
-  const env = readEnv(directory);
-  return {
-    config: async (config) => {
-      if (env.AGENT_MODEL_DEFAULT) config.model = env.AGENT_MODEL_DEFAULT;
-      config.agent = config.agent || {};
-      for (const [role, tier] of Object.entries(ROLE_TIER)) {
-        const model = env[TIER_ENV[tier]];
-        if (!model) continue;
-        config.agent[role] = {
-          ...(config.agent[role] || {}),
-          model,
-        };
-      }
-    },
-  };
-};
-'''
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

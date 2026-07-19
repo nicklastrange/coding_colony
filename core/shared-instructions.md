@@ -6,6 +6,10 @@ more precise.
 - Resolve the target repository explicitly and read its `AGENTS.md` first.
 - Resolve `ROOT_DIR`, `AGENT_ROOT`, commands, and machine-specific values from
   generated runtime configuration. Never hardcode local absolute paths.
+- Use launcher-provided `AGENT_PROJECT_SLUG` and `AGENT_PROJECT_DOCS` for central
+  task artifacts. Derive a fallback only when those values are unavailable.
+- Do not edit or remove the `.coding-colony-project.json` identity marker in a
+  central project-doc directory.
 - Before graph use, check both `graphify-out/graph.json` and
   `graphify-out/needs_update`. Query the graph only when the plugin is enabled
   and the graph exists; the marker means it is stale.
@@ -16,7 +20,8 @@ more precise.
   is permitted, prefer focused `rg --files` filters and `rg -n` symbol, caller,
   test, or configuration searches. Read the smallest useful ranges and expand
   only when evidence requires it.
-- Keep task artifacts under `AGENT_ROOT/docs/<project-slug>/`. Keep
+- Keep task artifacts under `AGENT_PROJECT_DOCS` (the matching
+  `AGENT_ROOT/docs/<project-slug>/`). Keep
   repository-owned guidance in repo-local `AGENTS.md` and `graphify-out/`.
 - Preserve user changes, keep edits surgical, and match existing patterns before
   adding new ones.

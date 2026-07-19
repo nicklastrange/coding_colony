@@ -35,7 +35,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
-log_dir="${TMPDIR:-/tmp}/agent-v2-gradle"
+log_dir="${TMPDIR:-/tmp}/coding-colony-gradle"
 mkdir -p "$log_dir"
 log_file="$log_dir/gradle-${timestamp}-$$.log"
 

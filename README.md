@@ -1,7 +1,7 @@
 # Coding Colony
 
-Coding Colony is a portable set of AI development workflows for teams and solo
-developers who use Codex, Claude Code, or OpenCode.
+Coding Colony is one centralized set of AI development workflows for teams and
+solo developers who use Codex, Claude Code, or OpenCode.
 
 It gives each harness the same high-level commands for product specification,
 task refinement, implementation planning, implementation, verification, and
@@ -14,17 +14,17 @@ repository documentation while still using each harness in its native format.
   `/verify`, and `/bookskeeper`.
 - Role-based agents with clear responsibilities, such as planner, implementer,
   reviewer, verifier, Scout, and bookskeeper.
-- Portable project installs that keep machine-specific paths and secrets in
-  `.env`.
-- Model tiers `fast`, `balanced`, `deep`, and `review` so agent definitions stay
-  provider-neutral.
+- One installation shared by every selected harness and target repository.
+- Model tiers `fast`, `balanced`, and `deep`, with per-agent tier and reasoning
+  configuration in `coding-colony.json`.
+- Separate conditional Kotlin, Spring Boot, and Flutter expert skills.
 - Optional integrations for tools like Graphify, context-mode, Playwright MCP,
   and Gradle test summarization.
 - Install output that contains only runtime files, not the installer source.
 
 ## Why Use It
 
-Agent V2 is meant for projects where AI agents should follow repeatable
+Coding Colony is meant for projects where AI agents should follow repeatable
 engineering workflows instead of improvising every task from scratch.
 
 Typical use cases:
@@ -43,44 +43,42 @@ Typical use cases:
 - Claude Code
 - OpenCode
 
-Install one harness when you only use one tool, or install all of them when you
-move between tools.
+Install all harnesses you use into the same central location, then switch tools
+between sessions without installing another copy.
 
 ## Quick Start
 
-Install all supported harnesses into the current directory:
+Install all supported harnesses into the default central location:
 
 ```bash
-./install.sh --portable .
+./install.sh --global --root-dir "$HOME/Code"
 ```
 
 Install only OpenCode:
 
 ```bash
-./install.sh --portable . --harness opencode
+./install.sh --global --harness opencode
 ```
 
 Install only Codex:
 
 ```bash
-./install.sh --portable . --harness codex
+./install.sh --global --harness codex
 ```
 
 Preview what would be generated without writing files:
 
 ```bash
-./install.sh --portable . --dry-run
+./install.sh --global --dry-run
 ```
 
-After installation, review the generated `.env`. It contains the workspace root,
-enabled harnesses, provider profile, model tier mappings, and optional tool
-status.
+After installation, review `coding-colony.json` for models and per-agent
+reasoning. `.env` contains generated paths, secrets, plugins, command overrides,
+and optional tool status.
 
-The installer also writes one profile per selected harness (`codex.env`,
-`claude.env`, or `opencode.env`) and a `coding-colony` launcher. Interactive
-installs ask whether to add the launcher directory to your shell's
-startup file. Use `--no-path-prompt` to skip that question. You can also add it
-manually to `PATH` to start a harness from a target repository:
+The installer writes a `coding-colony` launcher. Interactive installs ask
+whether to add its directory to your shell startup file. Use `--no-path-prompt`
+to skip that question. You can also add it manually to `PATH`:
 
 ```bash
 export PATH="/path/to/agent-setup/.config/bin:$PATH"
@@ -91,15 +89,17 @@ coding-colony codex --yolo
 Open a new shell or source the updated startup file after accepting the PATH
 prompt.
 
-Use `--repo PATH` when launching from another directory. The launcher activates
-the selected profile and passes the target repository to generated Gradle
-redirects. When using the launcher, edit the corresponding `codex.env`,
-`claude.env`, or `opencode.env`; it copies the selected profile to `.env`, so
-direct edits to `.env` are not durable across launches.
-
-`AGENT_MODEL_DEFAULT` controls the main/default harness agent independently from
-the role tiers. `AGENT_MODEL_FAST`, `AGENT_MODEL_BALANCED`, `AGENT_MODEL_DEEP`,
-and `AGENT_MODEL_REVIEW` control the specialized agents.
+Use `--repo PATH` when launching from another directory. The launcher reads
+`coding-colony.json`, synchronizes the selected harness's native files, and
+starts it with the target repository as its real workspace. It uses central
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `OPENCODE_CONFIG_DIR` roots and grants
+access to that project's central `docs/<project-slug>/` directory.
+Immediate children of `ROOT_DIR` keep a readable basename slug; nested or
+external repositories receive a path-derived suffix so same-named projects
+cannot share documents. On upgrade, an existing unmarked basename directory is
+claimed automatically only when exactly one matching Git repository exists
+under `ROOT_DIR`. Ambiguous ownership stops with an explicit marker-migration
+instruction instead of exposing one project's docs to another.
 
 If you use `direnv`, run this once from the installed directory:
 
@@ -111,28 +111,28 @@ direnv allow
 
 ### Portable Install
 
-Portable installs are best for a project-specific agent setup:
+Portable installs choose a relocatable central location:
 
 ```bash
 ./install.sh --portable /path/to/agent-setup --root-dir /path/to/workspace
 ```
 
-The installed folder can live beside the repositories it operates on. Runtime
-paths are written to `.env`.
+The installed folder can live anywhere and serve every repository it operates
+on. Runtime paths are written to `.env`.
 
 ### Global Install
 
-Global installs place the setup under your home directory:
+Global installs place the setup under `~/.coding-colony`:
 
 ```bash
 ./install.sh --global --root-dir /path/to/workspace
 ```
 
-Use this when you want one shared setup across many local repositories.
+This is the default choice for one shared setup across many local repositories.
 
 ## Harness Selection
 
-When `--harness` is omitted, Agent V2 generates config for all supported
+When `--harness` is omitted, Coding Colony generates config for all supported
 harnesses in best-effort mode.
 
 When `--harness` is provided, installation is strict by default. If the selected
@@ -147,13 +147,12 @@ Use `--no-strict` for best-effort generation:
 
 ## Providers And Models
 
-Agent V2 uses model tiers instead of hardcoding concrete models inside agent
+Coding Colony uses model tiers instead of hardcoding concrete models inside agent
 workflows:
 
 - `fast`
 - `balanced`
 - `deep`
-- `review`
 
 By default, each harness uses its native provider profile. You only need
 `--provider` when you intentionally want a compatible gateway. Profiles declare
@@ -174,14 +173,34 @@ LITELLM_BASE_URL=http://localhost:4000
 LITELLM_API_KEY=...
 ```
 
-You can change concrete model IDs later through the `AGENT_MODEL_*` values. Edit
-the harness-specific profile when using `coding-colony`, or `.env` when starting
-a harness directly from the installed setup. OpenCode resolves the active
-profile when its configuration reloads. Codex refreshes its root config and
-custom-agent files from the active `.env` at SessionStart, so restart Codex after
-changing them. Claude Code agent frontmatter requires concrete models; rerun the
-installer after changing its profile. Generated workflow instructions remain
-provider-neutral and continue to identify agents by tier.
+Change concrete tier mappings under `models.<harness>` and each agent's `model`
+and `reasoning` under `agents` in `coding-colony.json`. Reasoning values are
+passed through because harness and model vocabularies differ. The next
+`coding-colony <harness>` launch validates the config and synchronizes that
+harness; no reinstall is required. Running sessions are not hot-swapped.
+
+For example, the generated agent entries can be changed to:
+
+```json
+{
+  "gorn": { "model": "fast", "reasoning": "medium" },
+  "lester": { "model": "deep", "reasoning": "max" }
+}
+```
+
+## Conditional Development Skills
+
+The central install provides separate `kotlin`, `spring-boot`, and `flutter`
+skills in every selected harness. They are practical technology playbooks, with
+focused references for Kotlin language and coroutine semantics, Spring runtime
+and transaction behavior, and Flutter lifecycle and platform behavior.
+
+During `/analyze`, Lester detects stacks from the affected modules and records
+their evidence and exact skill names in the implementation plan. Skills compose:
+a Kotlin Spring Boot service loads both `kotlin` and `spring-boot`, while a Java
+Spring Boot service loads only `spring-boot`. During `/implement`, Gorn rechecks
+the affected modules, rejects an omitted match, and loads every applicable skill
+before editing. Lee loads the same skills and checks for omissions during review.
 
 ## Optional Integrations
 
@@ -189,19 +208,20 @@ When run interactively, the installer can ask about optional tools one by one.
 You can also enable them directly:
 
 ```bash
-./install.sh --portable . --plugin graphify --plugin context-mode
+./install.sh --global --plugin graphify --plugin context-mode
 ```
 
 If an enabled optional tool is missing, the installer can install it when you
 approve the prompt. For non-interactive installs, opt in explicitly:
 
 ```bash
-./install.sh --portable . --plugin graphify --install-missing-plugins
+./install.sh --global --plugin graphify --install-missing-plugins
 ```
 
 For Graphify, this installs the `graphifyy` package with `pipx` and then runs
-`graphify install --platform <harness>` for each selected harness so the tool is
-registered where the harness expects it.
+`graphify install --project --platform <harness>` from the central install for
+each selected harness so the tool cannot mutate unrelated user-global or source
+configuration.
 
 Available integrations:
 
@@ -243,24 +263,13 @@ Rhobar, Milten, Lester, and Xardas may use Scout for cheap bounded discovery;
 the parent agent still owns and validates the conclusion. The same six command
 bindings are generated for Codex, Claude Code, and OpenCode.
 
-## Generated Files
+## Central Install Layout
 
-Installed setups may contain:
-
-- `.codex/**`
-- `.claude/**`
-- `.opencode/**`
-- `.agents/**`
-- `.mcp.json`
-- `CLAUDE.md`
-- `.env`
-- `.envrc`
-- `.config/**`
-- `codex.env`, `claude.env`, `opencode.env`
-- `docs/**`
-
-Installed setups should not receive source files such as `install.sh`,
-`scripts/agent_setup.py`, `config/**`, or `core/**`.
+The important generated entries are `coding-colony.json`, `.env`, `docs/`, the
+`.config/bin/coding-colony` launcher, and one native runtime directory per
+selected harness: `.codex/`, `.claude/`, or `.opencode/`. These harness folders
+are views inside the same install, not separate Coding Colony copies. Target
+repositories keep their own source, `AGENTS.md`, and `graphify-out/` guidance.
 
 ## Development
 

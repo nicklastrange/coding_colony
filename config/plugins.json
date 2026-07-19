@@ -4,8 +4,8 @@
     "command_env": "GRAPHIFY_COMMAND",
     "mcp": false,
     "install_command": ["pipx", "install", "graphifyy"],
-    "post_install_command": ["graphify", "install", "--platform", "{platform}"],
-    "install_description": "Install Graphify with pipx, then register it for each selected harness with graphify install --platform."
+    "post_install_command": ["graphify", "install", "--project", "--platform", "{platform}"],
+    "install_description": "Install Graphify with pipx, then register it inside the central install with graphify install --project --platform."
   },
   "context-mode": {
     "description": "Optional context-mode MCP server.",

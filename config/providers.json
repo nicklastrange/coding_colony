@@ -11,8 +11,7 @@
     "tiers": {
       "fast": "gpt-5.4-mini",
       "balanced": "gpt-5.4",
-      "deep": "gpt-5.5",
-      "review": "gpt-5.5"
+      "deep": "gpt-5.5"
     }
   },
   "anthropic-native": {
@@ -22,8 +21,7 @@
     "tiers": {
       "fast": "haiku",
       "balanced": "sonnet",
-      "deep": "opus",
-      "review": "opus"
+      "deep": "opus"
     }
   },
   "opencode-native": {
@@ -33,8 +31,7 @@
     "tiers": {
       "fast": "github-copilot/gpt-5.4-mini",
       "balanced": "github-copilot/claude-sonnet-4.6",
-      "deep": "github-copilot/claude-opus-4.6",
-      "review": "github-copilot/claude-opus-4.6"
+      "deep": "github-copilot/claude-opus-4.6"
     }
   },
   "litellm": {
@@ -52,8 +49,7 @@
     "tiers": {
       "fast": "gpt-4.1-mini",
       "balanced": "claude-sonnet-4",
-      "deep": "claude-opus-4",
-      "review": "claude-opus-4"
+      "deep": "claude-opus-4"
     }
   },
   "openrouter": {
@@ -71,8 +67,7 @@
     "tiers": {
       "fast": "openai/gpt-4.1-mini",
       "balanced": "anthropic/claude-sonnet-4",
-      "deep": "anthropic/claude-opus-4",
-      "review": "anthropic/claude-opus-4"
+      "deep": "anthropic/claude-opus-4"
     }
   }
 }

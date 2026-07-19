@@ -9,7 +9,7 @@
   "rhobar": {
     "description": "Project spec writer. Consolidates project knowledge into durable project-level specifications.",
     "tier": "deep",
-    "effort": "xhigh",
+    "effort": "max",
     "sandbox": "workspace-write",
     "summary": "Create or refresh project specs from existing docs, repository evidence, and explicit user decisions."
   },
@@ -23,28 +23,28 @@
   "lester": {
     "description": "Analyzer and planner. Produces implementation plans grounded in the target repository.",
     "tier": "deep",
-    "effort": "xhigh",
+    "effort": "max",
     "sandbox": "workspace-write",
     "summary": "Analyze actual code and tests, surface material uncertainties, then write concrete implementation plans."
   },
   "gorn": {
     "description": "Implementer. Applies code changes precisely from a plan and verifies them.",
-    "tier": "balanced",
+    "tier": "fast",
     "effort": "medium",
     "sandbox": "workspace-write",
     "summary": "Implement requested changes surgically, add tests when needed, and run focused verification."
   },
   "lee": {
     "description": "Code reviewer. Performs read-only review for bugs, regressions, and missing tests.",
-    "tier": "review",
+    "tier": "deep",
     "effort": "high",
     "sandbox": "read-only",
     "summary": "Review changed files first, report findings by severity, and do not edit files."
   },
   "gomez": {
     "description": "Verifier. Cross-checks implementation against plans, code, and tests.",
-    "tier": "review",
-    "effort": "medium",
+    "tier": "deep",
+    "effort": "high",
     "sandbox": "workspace-write",
     "summary": "Verify requirements against actual code and test evidence. Pass only complete implementations."
   },

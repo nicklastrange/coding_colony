@@ -1,16 +1,15 @@
-# Agent V2 LLM Maintenance Guide
+# Coding Colony LLM Maintenance Guide
 
 This file is optimized for LLM agents maintaining this repository.
 
 ## Project Summary
 
-Agent V2 is an installer and source package that generates portable agent
-workflow configurations for Codex, Claude Code, and OpenCode.
+Coding Colony is an installer and source package that generates one centralized
+agent workflow setup shared by Codex, Claude Code, and OpenCode.
 
-The project goal is to keep one canonical set of role workflows and render it
-into each supported harness using that harness's native files and conventions.
-Installed projects should contain only runtime configuration. Source installer
-files must stay in this repository.
+The project goal is to keep one canonical set of role workflows and skills,
+render each harness's native runtime under one install, launch from the target
+repository, and keep durable project documents centralized.
 
 ## Core Concepts
 
@@ -19,23 +18,26 @@ files must stay in this repository.
 - Role: a named workflow agent, such as `xardas`, `gorn`, `lester`, or `lee`.
 - Command: a slash workflow such as `/bookskeeper` or `/implement`.
 - Provider: a model provider profile from `config/providers.json`.
-- Tier: a provider-neutral model label: `fast`, `balanced`, `deep`, or `review`.
-  The root/default agent has its separate `default` model mapping.
+- Tier: a provider-neutral model label: `fast`, `balanced`, or `deep`. The
+  root/default agent has its separate `default` model mapping.
 - Plugin: an optional integration from `config/plugins.json`, such as Graphify
   or context-mode.
-- Installed setup: the generated runtime folder produced by `install.sh`.
+- Installed setup: one central runtime root for every selected harness.
 
 ## Source Of Truth
 
-- `scripts/agent_setup.py`: installer and renderer for all generated runtime
-  files, including harness profiles and the `coding-colony` launcher.
-- `config/roles.json`: role metadata, tier, effort, sandbox, and summary.
+- `scripts/agent_setup.py`: installer, renderer, launch-time runtime sync, and
+  the `coding-colony` launcher.
+- `config/roles.json`: default role tier, effort, sandbox, and metadata.
 - `core/shared-instructions.md`: behavioral rules rendered into every role.
 - `core/role-workflows.md`: canonical role workflow bodies. Add or modify role
   behavior here first.
+- `skills/*/SKILL.md` and their `references/`: canonical conditional development
+  skills. Keep language and framework expertise separate so stacks compose.
 - `config/providers.json`: provider profiles and concrete model mappings.
 - `config/plugins.json`: optional integration definitions and commands.
-- `.env.example`: generated environment keys and comments.
+- `.env.example`: generated paths, plugin state, command overrides, and secrets;
+  model and agent configuration belongs in installed `coding-colony.json`.
 - `tests/test_installation_integrity.py`: regression tests for generated output.
 - `README.md`: user-facing project overview and installation guide.
 - `AGENTS.md`: repository-level rules for agents working on this source package.
@@ -51,15 +53,24 @@ Keep harness-specific logic in `scripts/agent_setup.py`. Harness-specific logic
 includes frontmatter, config format, MCP format, model resolution, plugin hooks,
 and command binding.
 
-Keep provider-specific model IDs out of role workflows and generated agent
-frontmatter where tiers are supported. Use tier names in role definitions and
-resolve concrete models through `.env` or harness config.
+Keep provider-specific model IDs out of role workflows. Provider defaults seed
+installed `coding-colony.json`; its `models.<harness>` mappings and
+`agents.<role>` tier/reasoning values are the user-facing configuration.
+
+Keep one central installation. Launch with central `CODEX_HOME`,
+`CLAUDE_CONFIG_DIR`, or `OPENCODE_CONFIG_DIR`, but keep the target repository as
+the harness workspace/cwd. Grant its central `docs/<project-slug>/` directory as
+the additional writable location.
+
+On every launch, validate `coding-colony.json` and synchronize only the selected
+harness's concrete model and reasoning fields. Do not add harness profiles,
+`.env` model keys, an OpenCode model-tier resolver, or model-refresh hooks.
 
 Keep optional integrations optional. Generated prompts may say a plugin is
 enabled or disabled. Workflows that require a disabled or missing optional tool
 must report the missing dependency instead of fabricating output.
 
-Do not copy installer source files into installed projects. Runtime installs
+Do not copy installer source files into central runtime installs. Runtime roots
 should not contain source `install.sh`, `scripts/agent_setup.py`, `config/**`, or
 `core/**`.
 
@@ -75,10 +86,17 @@ Codex, Claude Code, and OpenCode.
 - Lester returns `READY` or `BLOCKED`. A ready plan traces every requirement to
   repository evidence, file/symbol changes, tests, expected signals, and strict
   Lee review checks; it contains no unresolved material implementation choice.
+  Lester detects Kotlin, Spring Boot, and Flutter independently from affected
+  module evidence, loads every matching skill, and records exact required skill
+  names or `none`. Kotlin Spring Boot requires both language and framework skills.
 - Gorn implements a ready plan and must delegate to Lee. A failing review starts
   another remediation, verification, and review cycle until Lee returns `PASS`
-  or Gorn reports an external blocker. Changes with runtime-wiring risk require
-  runnable startup/bootstrap evidence, not compilation alone.
+  or Gorn reports an external blocker. Before editing, Gorn re-detects affected
+  stacks, rejects an omitted match, and loads every applicable development skill.
+  Changes with runtime-wiring risk require runnable startup/bootstrap evidence,
+  not compilation alone.
+- Lee loads the plan-required development skills before reviewing language and
+  framework correctness.
 - Scout is fast, low-effort, and read-only. Rhobar, Milten, Lester, and Xardas
   may use it for bounded repository discovery, but the parent validates all
   critical evidence and owns the output.
@@ -109,6 +127,18 @@ Codex, Claude Code, and OpenCode.
 4. Update README command documentation if user-facing.
 5. Add test assertions for command binding.
 
+## Adding A Development Skill
+
+1. Add `skills/<lowercase-hyphen-name>/SKILL.md` with concise, trigger-complete
+   frontmatter and only stack-specific procedure that changes agent behavior.
+   Put detailed, conditionally loaded expertise in `references/`; do not combine
+   a language and framework merely because they are commonly used together.
+2. Update Lester's evidence-based detection and plan handoff when the skill is
+   conditional.
+3. Render the canonical skill into every selected harness's native skill
+   directory.
+4. Add focused source and generated-copy assertions.
+
 ## Adding A New Harness
 
 1. Add the harness name to `SUPPORTED_HARNESSES`.
@@ -124,8 +154,7 @@ Codex, Claude Code, and OpenCode.
 1. Add a profile to `config/providers.json`.
 2. Declare `supported_harnesses`; list only harnesses that can resolve both the
    profile's model IDs and provider transport.
-3. Provide all model tiers: `fast`, `balanced`, `deep`, and `review`. Keep the
-   review model at least as capable as the deep model.
+3. Provide `default`, `fast`, `balanced`, and `deep` model mappings.
 4. Add gateway fields when needed, such as base URL and API key env vars.
 5. Update `.env.example` when new env vars are required.
 6. Run the installer tests. They generate every supported provider/harness
@@ -145,22 +174,28 @@ Codex, Claude Code, and OpenCode.
 7. Log install and configuration attempts through `AGENT_PLUGIN_INSTALLS`.
 8. Add integrity tests for generated config and optional behavior.
 
-## OpenCode Model Tiers
+## Installed Configuration And Launcher
 
-OpenCode agent frontmatter should use tier names, for example `model: deep`.
-The generated `model-tier-resolver.js` plugin resolves tiers from `.env` during
-OpenCode config loading.
+`coding-colony.json` contains `models` and `agents`. Every installed harness has
+`default`, `fast`, `balanced`, and `deep` concrete model mappings. Every role has
+exactly one tier and one non-empty reasoning value. Preserve existing values on
+reinstall and fill only missing defaults.
 
-Do not put concrete provider IDs such as `openai/...` or `github-copilot/...`
-inside generated OpenCode agent frontmatter.
-
-Changing `.env` model values is picked up on OpenCode config reload or restart.
-Do not promise live model hot-swapping inside an already-running session unless
-OpenCode itself guarantees it.
+The launcher reads `.env` without replacing it, syncs the selected native
+runtime, exports target-repository and central-doc paths, then starts the
+harness from the target repository. Model changes take effect on the next
+launch without reinstalling; do not promise hot swapping inside a running
+session. Preserve existing basename-only project docs by claiming them only
+when a workspace scan proves the Git repository slug is unique; ambiguous
+legacy ownership must stop with an explicit identity-marker migration message.
 
 OpenCode role agents must be `mode: subagent`; command files must set
-`subtask: true`. Encode read-only and delegation boundaries in native
-permissions instead of relying only on prose.
+`subtask: true`. Their explicit task permission must deny `*` and allow only
+the named Lee or Scout child; stable OpenCode uses that rule to permit the one
+required nested delegation while preventing recursive fan-out. Claude command
+skills use a named agent in a fork; current Claude forks can spawn named
+subagents even though they cannot spawn another fork. Encode read-only and
+delegation boundaries in native permissions instead of relying only on prose.
 
 ## Bookskeeper Contract
 
@@ -178,7 +213,7 @@ Expected repository-owned outputs are:
 - `graphify-out/BUSINESS_LOGIC.md`
 - repo-local `AGENTS.md` managed section
 
-Project-scoped docs under `AGENT_ROOT/docs/<project-slug>/` are allowed as
+Project-scoped docs under launcher-provided `AGENT_PROJECT_DOCS` are allowed as
 supporting material, but they are not a replacement for the repo-owned
 Bookskeeper outputs.
 
@@ -193,11 +228,11 @@ python3 -m unittest discover -s tests -v
 Also run Python compile checks after editing installer code:
 
 ```bash
-PYTHONPYCACHEPREFIX=/private/tmp/agent-v2-oss-pycache python3 -m py_compile scripts/agent_setup.py tests/test_installation_integrity.py
+PYTHONPYCACHEPREFIX=/tmp/coding-colony-pycache python3 -m py_compile scripts/agent_setup.py tests/test_installation_integrity.py
 ```
 
-For generated OpenCode JavaScript plugins, run `node --check` on the generated
-plugin file in a temporary install or target install.
+For generated JavaScript plugins, run `node --check` on each present plugin in a
+temporary or target install.
 
 ## Common Failure Modes
 
@@ -205,19 +240,20 @@ plugin file in a temporary install or target install.
   `core/role-workflows.md` parsing and `role_prompt()` usage.
 - Shared rules differ between roles: ensure `role_prompt()` renders
   `core/shared-instructions.md` rather than a hardcoded copy.
-- Hardcoded provider models appear in agent files: check tier rendering and
-  provider resolution.
+- A model change is ignored: validate `coding-colony.json`, launch through
+  `coding-colony`, and inspect the selected harness's concrete runtime files.
 - Optional tools are assumed when disabled: check plugin-conditional prompt
   text and generated `.env` fields.
 - Missing optional tools are enabled but never installed: check
   `install_command`, `--install-missing-plugins`, interactive install prompts,
   and `AGENT_PLUGIN_INSTALLS`.
 - Graphify is installed but not operational in a harness: check
-  `post_install_command` and verify `graphify install --platform <harness>` was
-  run for each selected harness.
+  `post_install_command` and verify
+  `graphify install --project --platform <harness>` ran from `AGENT_ROOT` for
+  each selected harness.
 - Installed folders contain source installer files: check copy/generation logic.
-- OpenCode command delegates to the right agent but uses the wrong model: check
-  generated tier frontmatter, `.env` model values, and `model-tier-resolver.js`.
+- A conditional development skill is missing: check `skills/`, its generated
+  native copies, Lester's detection evidence, and Gorn's plan handoff.
 - A harness is missing a command: verify all six bindings, including Claude
   `.claude/skills/<command>/SKILL.md` files.
 
@@ -227,6 +263,5 @@ plugin file in a temporary install or target install.
   workflow text.
 - Keep README user-facing. Put maintainer details in this file.
 - Keep tests focused on generated output integrity.
-- Preserve user edits in installed `.env` when reinstalling without an explicit
-  provider.
+- Preserve user edits in installed `coding-colony.json` and `.env`.
 - Avoid broad rewrites. Generator changes should be small and covered by tests.

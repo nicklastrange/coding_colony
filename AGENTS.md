@@ -1,8 +1,10 @@
-# Agentic Setup
+# Coding Colony
 
-This repository is a portable agentic development setup. Runtime paths and
-machine-specific options are generated into `.env` by `./install.sh`; do not
-hardcode local paths in instructions, hooks, plugins, or harness config.
+This repository is a centralized agentic development setup shared by every
+installed harness. Runtime paths and machine-specific options are generated
+into `.env`; model mappings and per-agent choices live in
+`coding-colony.json`. Do not hardcode local paths in instructions, hooks,
+plugins, or harness config.
 
 ## Runtime Configuration
 
@@ -11,6 +13,11 @@ hardcode local paths in instructions, hooks, plugins, or harness config.
 - `AGENT_HARNESSES` lists generated harnesses: `codex`, `claude`, `opencode`.
 - `AGENT_PROVIDER` selects the model provider profile.
 - `AGENT_PLUGINS` lists optional integrations such as `graphify`.
+- `AGENT_PROJECT_SLUG` and `AGENT_PROJECT_DOCS` identify the current target's
+  collision-safe central document location when launched through
+  `coding-colony`.
+- `coding-colony.json` maps `fast`, `balanced`, and `deep` to harness models and
+  selects a model tier and reasoning level for each agent.
 
 If `.env` is missing, run:
 
@@ -49,7 +56,7 @@ must preserve these contracts.
 - Read a target repository's local `AGENTS.md` first when present.
 - Treat `core/shared-instructions.md` as the source of truth for behavior shared
   by every role; render it instead of duplicating shared rules in generators.
-- Keep generated task documents under `AGENT_ROOT/docs/<project-slug>/`.
+- Keep generated task documents under launcher-provided `AGENT_PROJECT_DOCS`.
 - Keep repository-owned guidance in the target repository, such as
   `graphify-out/*` and repo-local `AGENTS.md`.
 - Prefer focused file reads and targeted verification over broad dumps.

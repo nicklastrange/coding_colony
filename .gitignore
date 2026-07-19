@@ -4,7 +4,9 @@
 
 # Local install state
 .env
+coding-colony.json
 .agent-v2/
+.coding-colony/
 
 # Generated harness outputs
 .codex/
@@ -32,4 +34,3 @@ node_modules/
 *.tmp
 __pycache__/
 .pytest_cache/
-

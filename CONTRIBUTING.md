@@ -15,7 +15,7 @@ Keep the repository source-of-truth small and harness-neutral.
 Before proposing changes, run:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/agent-v2-oss-pycache python3 -m py_compile scripts/agent_setup.py tests/test_installation_integrity.py
+PYTHONPYCACHEPREFIX=/tmp/coding-colony-pycache python3 -m py_compile scripts/agent_setup.py tests/test_installation_integrity.py
 python3 -m unittest discover -s tests -v
-./install.sh --portable /tmp/agent-v2-oss-smoke --harness codex --no-strict --dry-run
+./install.sh --portable /tmp/coding-colony-smoke --harness codex --no-strict --dry-run
 ```
