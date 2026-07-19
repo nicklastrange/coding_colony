@@ -886,13 +886,21 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
         'model_reasoning_effort = "medium"',
     ]
     codex_provider = provider.get("codex_provider")
+    provider_bridge = None
     if codex_provider:
-        provider_id = codex_provider["id"]
+        provider_id = f"coding_colony_{codex_provider['id']}"
         base_url = (
             env.get(provider.get("base_url_env", ""), "")
             or provider.get("default_base_url", "")
             or "${" + provider.get("base_url_env", "PROVIDER_BASE_URL") + "}"
         )
+        provider_bridge = {
+            "id": provider_id,
+            "name": codex_provider["name"],
+            "base_url": base_url,
+            "env_key": provider.get("api_key_env", "PROVIDER_API_KEY"),
+            "wire_api": codex_provider.get("wire_api", "responses"),
+        }
         config_lines.extend([
             f"model_provider = {toml_string(provider_id)}",
             "",
@@ -912,23 +920,50 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
         "max_threads = 3",
         "max_depth = 2",
     ])
-    for name, server in mcp_servers(plugins, env).items():
+    codex_mcp_servers = mcp_servers(plugins, env)
+    for name, server in codex_mcp_servers.items():
         config_lines.extend(["", f"[mcp_servers.{name}]", f"command = {toml_string(server['command'])}"])
     write_file(codex_dir / "config.toml", "\n".join(config_lines) + "\n", dry_run)
+    write_file(
+        codex_dir / "bridge.json",
+        json.dumps({
+            "agents": {role_name: roles[role_name]["description"] for role_name in ROLE_ORDER},
+            "mcp_servers": codex_mcp_servers,
+        }, indent=2) + "\n",
+        dry_run,
+    )
     write_file(codex_dir / "AGENTS.md", render_agents_md(), dry_run)
 
     for role_name in ROLE_ORDER:
         role = roles[role_name]
-        content = "\n".join([
+        role_provider = (
+            provider_bridge["id"]
+            if provider_bridge
+            else provider.get("harness_defaults", {}).get("codex", {}).get("provider_id")
+        )
+        role_lines = [
             f"name = {toml_string(role_name)}",
             f"description = {toml_string(role['description'])}",
             f"model = {toml_string(env.get(tier_env_name(role['tier']), provider['tiers'][role['tier']]))}",
             f"model_reasoning_effort = {toml_string(role['effort'])}",
             f"sandbox_mode = {toml_string(role['sandbox'])}",
+        ]
+        if role_provider:
+            role_lines.append(f"model_provider = {toml_string(role_provider)}")
+        role_lines.extend([
             "",
             f"developer_instructions = {toml_multiline(role_prompt(role_name, role, plugins, workflows))}",
-            "",
         ])
+        if provider_bridge:
+            role_lines.extend([
+                "",
+                f"[model_providers.{provider_bridge['id']}]",
+                f"name = {toml_string(provider_bridge['name'])}",
+                f"base_url = {toml_string(provider_bridge['base_url'])}",
+                f"env_key = {toml_string(provider_bridge['env_key'])}",
+                f"wire_api = {toml_string(provider_bridge['wire_api'])}",
+            ])
+        content = "\n".join([*role_lines, ""])
         write_file(codex_dir / "agents" / f"{role_name}.toml", content, dry_run)
 
     hooks = {
@@ -937,7 +972,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
                 "matcher": "startup|resume|clear|compact",
                 "hooks": [{
                     "type": "command",
-                    "command": "/usr/bin/python3 \"$CODEX_HOME/hooks/session_context.py\"",
+                    "command": "/usr/bin/python3 \"$AGENT_ROOT/.codex/hooks/session_context.py\"",
                     "statusMessage": "Loading generated agent context"
                 }]
             }]
@@ -948,7 +983,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": "/usr/bin/python3 \"$CODEX_HOME/hooks/pre_tool_use_policy.py\"",
+                "command": "/usr/bin/python3 \"$AGENT_ROOT/.codex/hooks/pre_tool_use_policy.py\"",
                 "statusMessage": "Checking shell command"
             }]
         }]
@@ -1440,7 +1475,7 @@ def parse_args(argv):
     harness, remaining = argv[0], argv[1:]
     if harness not in HARNESSES:
         usage()
-    repo = Path.cwd()
+    repo = None
     yolo = False
     passthrough = []
     index = 0
@@ -1463,13 +1498,19 @@ def parse_args(argv):
         index += 1
     if yolo and harness == "claude":
         fail("--yolo is supported only for codex and opencode", 64)
+    return harness, repo, yolo, passthrough
+
+
+def resolve_repo(repo, agent_root):
+    if repo is None:
+        repo = agent_root
     try:
         repo = repo.resolve(strict=True)
     except OSError as error:
         fail(f"Invalid repository path: {error}", 64)
     if not repo.is_dir():
         fail(f"Repository path is not a directory: {repo}", 64)
-    return harness, repo, yolo, passthrough
+    return repo
 
 
 def read_env(path):
@@ -1484,6 +1525,137 @@ def read_env(path):
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
             values[key.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
+def load_codex_bridge(agent_root):
+    path = agent_root / ".codex" / "bridge.json"
+    try:
+        bridge = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Invalid generated Codex bridge {path}: {error}")
+    if not isinstance(bridge, dict) or set(bridge) != {"agents", "mcp_servers"}:
+        fail(f"Invalid generated Codex bridge contract: {path}")
+    if not isinstance(bridge["agents"], dict) or set(bridge["agents"]) != set(ROLE_NAMES):
+        fail(f"Invalid generated Codex agent bridge: {path}")
+    if not isinstance(bridge["mcp_servers"], dict):
+        fail(f"Invalid generated Codex MCP bridge: {path}")
+    return bridge
+
+
+def toml_inline(value):
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_inline(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(
+            f"{json.dumps(str(key))} = {toml_inline(item)}" for key, item in value.items()
+        ) + " }"
+    fail(f"Cannot encode generated Codex bridge value of type {type(value).__name__}")
+
+
+def rewrite_codex_hook_paths(value):
+    if isinstance(value, str):
+        return value.replace("${CODEX_HOME}", "${AGENT_ROOT}/.codex").replace(
+            "$CODEX_HOME", "$AGENT_ROOT/.codex"
+        )
+    if isinstance(value, list):
+        return [rewrite_codex_hook_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: rewrite_codex_hook_paths(item) for key, item in value.items()}
+    return value
+
+
+def user_codex_home(environment):
+    configured = environment.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    user_home = Path(environment.get("HOME") or str(Path.home())).expanduser().resolve()
+    return user_home / ".codex"
+
+
+def link_codex_skills(agent_root, environment):
+    source_root = agent_root / ".codex" / "skills"
+    user_home = Path(environment.get("HOME") or str(Path.home())).expanduser().resolve()
+    destination_root = user_home / ".agents" / "skills"
+    destination = destination_root / "coding-colony"
+    try:
+        destination_root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"Cannot create Codex skill directory {destination_root}: {error}")
+    if destination.is_symlink():
+        try:
+            if destination.resolve(strict=True) == source_root.resolve(strict=True):
+                return
+        except OSError:
+            pass
+    if destination.exists() or destination.is_symlink():
+        fail(
+            f"Cannot register Coding Colony skills because {destination} already exists. "
+            "Move that path or link it to the installed .codex/skills directory."
+        )
+    try:
+        destination.symlink_to(source_root, target_is_directory=True)
+    except FileExistsError:
+        try:
+            if (
+                destination.is_symlink()
+                and destination.resolve(strict=True) == source_root.resolve(strict=True)
+            ):
+                return
+        except OSError:
+            pass
+        fail(f"Cannot register Coding Colony skills because {destination} was created concurrently")
+    except OSError as error:
+        fail(f"Cannot link Codex skills {source_root} into {destination}: {error}")
+
+
+def append_codex_config(command, key, value):
+    command.extend(["--config", f"{key}={toml_inline(value)}"])
+
+
+def codex_command(agent_root, repo, docs, environment):
+    codex_home = user_codex_home(environment)
+    try:
+        codex_home.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        fail(f"Cannot create Codex home {codex_home}: {error}")
+    environment["CODEX_HOME"] = str(codex_home)
+    link_codex_skills(agent_root, environment)
+    bridge = load_codex_bridge(agent_root)
+    command = ["codex"]
+
+    command.extend(["--enable", "hooks", "--enable", "multi_agent"])
+    append_codex_config(command, "agents.max_threads", 3)
+    append_codex_config(command, "agents.max_depth", 2)
+    for role in ROLE_NAMES:
+        append_codex_config(command, f"agents.{role}.description", bridge["agents"][role])
+        append_codex_config(
+            command,
+            f"agents.{role}.config_file",
+            str(agent_root / ".codex" / "agents" / f"{role}.toml"),
+        )
+
+    hooks_path = agent_root / ".codex" / "hooks.json"
+    try:
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        fail(f"Invalid generated Codex hooks {hooks_path}: {error}")
+    if not isinstance(hooks, dict):
+        fail(f"Invalid generated Codex hooks contract: {hooks_path}")
+    for event, definitions in hooks.items():
+        append_codex_config(command, f"hooks.{event}", rewrite_codex_hook_paths(definitions))
+
+    for name, server in bridge["mcp_servers"].items():
+        safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_")
+        append_codex_config(command, f"mcp_servers.coding_colony_{safe_name}", server)
+
+    command.extend(["-C", str(repo), "--add-dir", str(docs)])
+    return command
 
 
 def load_config(agent_root, harness):
@@ -1738,6 +1910,7 @@ def main(argv):
     environment = dict(os.environ)
     for key, value in read_env(agent_root / ".env").items():
         environment.setdefault(key, value)
+    repo = resolve_repo(repo, agent_root)
     docs = project_docs(agent_root, repo, environment)
     slug = docs.name
     environment.update({
@@ -1748,8 +1921,7 @@ def main(argv):
     })
 
     if harness == "codex":
-        environment["CODEX_HOME"] = str(agent_root / ".codex")
-        command = ["codex", "-C", str(repo), "--add-dir", str(docs)]
+        command = codex_command(agent_root, repo, docs, environment)
         if yolo:
             command.append("--dangerously-bypass-approvals-and-sandbox")
     elif harness == "claude":

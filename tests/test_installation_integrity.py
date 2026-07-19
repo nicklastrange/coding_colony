@@ -165,7 +165,7 @@ class InstallationIntegrityTests(unittest.TestCase):
                     hooks = json.loads((agent_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
                     session_command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
                     self.assertNotIn("git rev-parse", session_command)
-                    self.assertIn("$CODEX_HOME/hooks/session_context.py", session_command)
+                    self.assertIn("$AGENT_ROOT/.codex/hooks/session_context.py", session_command)
                     codex_config = (agent_root / ".codex" / "config.toml").read_text(encoding="utf-8")
                     self.assertIn("multi_agent = true", codex_config)
                 if "claude" in harnesses:
@@ -292,6 +292,21 @@ class InstallationIntegrityTests(unittest.TestCase):
         colony["agents"]["gorn"] = {"model": "deep", "reasoning": "max"}
         colony_path.write_text(json.dumps(colony, indent=2) + "\n", encoding="utf-8")
         central_config = colony_path.read_text(encoding="utf-8")
+        user_home = agent_root.parent / "user-home"
+        user_codex_home = user_home / ".codex"
+        user_codex_home.mkdir(parents=True)
+        user_config = (
+            'model = "user-global-model"\n'
+            '[features]\n'
+            'web_search_request = true\n'
+            '[mcp_servers.user_global]\n'
+            'command = "user-global-mcp"\n'
+        )
+        (user_codex_home / "config.toml").write_text(user_config, encoding="utf-8")
+        (user_codex_home / "auth.json").write_text('{"auth_mode":"apikey"}\n', encoding="utf-8")
+        user_codex_snapshot = {
+            path.name: path.read_text(encoding="utf-8") for path in user_codex_home.iterdir()
+        }
 
         fake_bin = agent_root.parent / "bin"
         fake_bin.mkdir()
@@ -326,6 +341,8 @@ Path(os.environ["CAPTURE"]).write_text(json.dumps({
                 **os.environ,
                 "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
                 "CAPTURE": str(capture),
+                "HOME": str(user_home),
+                "CODEX_HOME": str(user_codex_home),
                 "OPENCODE_CONFIG_CONTENT": '{"theme":"dark","permission":{"bash":"ask","external_directory":{"/existing/**":"deny"}}}',
             }
             launch_env.pop("AGENT_PROVIDER", None)
@@ -350,6 +367,10 @@ Path(os.environ["CAPTURE"]).write_text(json.dumps({
 
         self.assertEqual(env_path.read_text(encoding="utf-8"), shared_env)
         self.assertEqual(colony_path.read_text(encoding="utf-8"), central_config)
+        self.assertEqual(
+            {path.name: path.read_text(encoding="utf-8") for path in user_codex_home.iterdir()},
+            user_codex_snapshot,
+        )
         self.assertTrue(docs_dir.is_dir())
         for harness, result in results.items():
             self.assertEqual(result["provider"], "native")
@@ -358,9 +379,25 @@ Path(os.environ["CAPTURE"]).write_text(json.dumps({
             self.assertEqual(result["project_slug"], "demo-project")
             self.assertEqual(result["project_docs"], str(docs_dir))
 
-        self.assertEqual(results["codex"]["codex_home"], str(agent_root / ".codex"))
+        self.assertEqual(results["codex"]["codex_home"], str(user_codex_home))
+        codex_argv = results["codex"]["argv"]
+        self.assertNotIn("--model", codex_argv)
+        self.assertEqual(codex_argv.count("--enable"), 2)
+        self.assertIn("hooks", codex_argv)
+        self.assertIn("multi_agent", codex_argv)
+        codex_overrides = [codex_argv[index + 1] for index, value in enumerate(codex_argv) if value == "--config"]
+        self.assertIn("agents.max_threads=3", codex_overrides)
+        self.assertIn("agents.max_depth=2", codex_overrides)
+        for role in self.roles:
+            description = json.dumps(self.roles[role]["description"])
+            self.assertIn(f"agents.{role}.description={description}", codex_overrides)
+            role_path = agent_root / ".codex" / "agents" / f"{role}.toml"
+            expected = f'agents.{role}.config_file="{role_path}"'
+            self.assertIn(expected, codex_overrides)
+        session_override = next(value for value in codex_overrides if value.startswith("hooks.SessionStart="))
+        self.assertIn("$AGENT_ROOT/.codex/hooks/session_context.py", session_override)
         self.assertEqual(
-            results["codex"]["argv"],
+            codex_argv[-7:],
             [
                 "-C",
                 str(target_repo),
@@ -371,6 +408,9 @@ Path(os.environ["CAPTURE"]).write_text(json.dumps({
                 "codex",
             ],
         )
+        skill_link = user_home / ".agents" / "skills" / "coding-colony"
+        self.assertTrue(skill_link.is_symlink())
+        self.assertEqual(skill_link.resolve(), (agent_root / ".codex" / "skills").resolve())
         self.assertEqual(results["claude"]["claude_config_dir"], str(agent_root / ".claude"))
         self.assertEqual(
             results["claude"]["argv"],
@@ -399,6 +439,60 @@ Path(os.environ["CAPTURE"]).write_text(json.dumps({
         opencode_gorn = frontmatter(agent_root / ".opencode" / "agents" / "gorn.md")
         self.assertEqual(opencode_gorn["model"], "opencode-deep")
         self.assertEqual(opencode_gorn["variant"], "max")
+
+    def test_codex_launcher_defaults_to_agent_root_and_preserves_user_home(self) -> None:
+        agent_root = self.install("--harness", "codex")
+        target_repo = agent_root.parent / "repo"
+        target_repo.mkdir()
+        fake_bin = agent_root.parent / "bin"
+        fake_bin.mkdir()
+        executable = fake_bin / "codex"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['CAPTURE']).write_text(json.dumps({"
+            "'argv': sys.argv[1:], 'codex_home': os.environ['CODEX_HOME'], "
+            "'cwd': os.getcwd(), 'target': os.environ['AGENT_TARGET_REPO']}))\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        user_home = agent_root.parent / "home"
+        capture = agent_root.parent / "capture.json"
+        launch_env = {
+            **os.environ,
+            "HOME": str(user_home),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "CAPTURE": str(capture),
+        }
+        launch_env.pop("CODEX_HOME", None)
+        launch = [
+            str(agent_root / ".config" / "bin" / "coding-colony"),
+            "codex",
+        ]
+
+        subprocess.run(launch, cwd=target_repo, check=True, text=True, capture_output=True, env=launch_env)
+        subprocess.run(launch, cwd=target_repo, check=True, text=True, capture_output=True, env=launch_env)
+        result = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(result["codex_home"], str(user_home / ".codex"))
+        self.assertEqual(result["cwd"], str(agent_root))
+        self.assertEqual(result["target"], str(agent_root))
+        self.assertTrue((user_home / ".codex").is_dir())
+        self.assertNotIn("--model", result["argv"])
+        skill_link = user_home / ".agents" / "skills" / "coding-colony"
+        self.assertTrue(skill_link.is_symlink())
+        self.assertEqual(skill_link.resolve(), (agent_root / ".codex" / "skills").resolve())
+
+        conflicting_home = agent_root.parent / "conflicting-home"
+        conflict = conflicting_home / ".agents" / "skills" / "coding-colony"
+        conflict.mkdir(parents=True)
+        marker = conflict / "keep.txt"
+        marker.write_text("user-owned\n", encoding="utf-8")
+        conflicting_env = {**launch_env, "HOME": str(conflicting_home)}
+        failed = subprocess.run(launch, cwd=target_repo, text=True, capture_output=True, env=conflicting_env)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("already exists", failed.stderr)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "user-owned\n")
 
     def test_launcher_separates_same_named_nested_repositories(self) -> None:
         agent_root = self.install("--harness", "opencode")
@@ -820,6 +914,13 @@ for path in (root / "agents").glob("*.md"):
         self.assertIn("max_threads = 3", config)
         self.assertIn("max_depth = 2", config)
         self.assertEqual(
+            json.loads((agent_root / ".codex" / "bridge.json").read_text(encoding="utf-8")),
+            {
+                "agents": {role_name: role["description"] for role_name, role in self.roles.items()},
+                "mcp_servers": {},
+            },
+        )
+        self.assertEqual(
             {path.stem for path in (agent_root / ".codex" / "agents").glob("*.toml")},
             set(self.roles),
         )
@@ -831,6 +932,12 @@ for path in (root / "agents").glob("*.md"):
             self.assertIn(f'model = "{provider["tiers"][role["tier"]]}"', content)
             self.assertIn(f'model_reasoning_effort = "{role["effort"]}"', content)
             self.assertIn(f'sandbox_mode = "{role["sandbox"]}"', content)
+            if provider.get("codex_provider"):
+                provider_id = f'coding_colony_{provider["codex_provider"]["id"]}'
+                self.assertIn(f'model_provider = "{provider_id}"', content)
+                self.assertIn(f"[model_providers.{provider_id}]", content)
+            else:
+                self.assertIn('model_provider = "openai"', content)
             self.assertIn("Role workflow:", content)
             self.assertIn(self.shared_instructions, content)
 

@@ -89,11 +89,22 @@ coding-colony codex --yolo
 Open a new shell or source the updated startup file after accepting the PATH
 prompt.
 
-Use `--repo PATH` when launching from another directory. The launcher reads
-`coding-colony.json`, synchronizes the selected harness's native files, and
-starts it with the target repository as its real workspace. It uses central
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `OPENCODE_CONFIG_DIR` roots and grants
-access to that project's central `docs/<project-slug>/` directory.
+By default, the launcher starts the harness in the Coding Colony installation
+directory (`AGENT_ROOT`), regardless of the terminal's current directory. Use
+`--repo PATH` to open a specific repository instead. The launcher reads
+`coding-colony.json`,
+synchronizes the selected harness's native files, and starts it with that path
+as its real workspace. Claude Code and
+OpenCode use the central `CLAUDE_CONFIG_DIR` or `OPENCODE_CONFIG_DIR`. Codex
+keeps the user's active `CODEX_HOME`, so existing config, authentication,
+sessions, state, user hooks, and MCP servers remain available. Coding Colony
+adds its agents, hooks, limits, and namespaced MCP servers for that invocation
+and links its central skill directory at `~/.agents/skills/coding-colony`.
+Neither the user's Codex config nor auth file is rewritten.
+Codex still applies its normal trust review to the added hooks.
+
+The launcher also grants access to that project's central
+`docs/<project-slug>/` directory.
 Immediate children of `ROOT_DIR` keep a readable basename slug; nested or
 external repositories receive a path-derived suffix so same-named projects
 cannot share documents. On upgrade, an existing unmarked basename directory is
@@ -179,6 +190,14 @@ passed through because harness and model vocabularies differ. The next
 `coding-colony <harness>` launch validates the config and synchronizes that
 harness; no reinstall is required. Running sessions are not hot-swapped.
 
+For Codex, `models.codex.fast`, `balanced`, and `deep` select the named Colony
+agents' models. The active Codex configuration keeps control of the root
+session model and provider; `models.codex.default` remains in the shared schema
+and generated central artifact but is not passed as a launcher override. Use
+normal Codex config or append `--model` after the launcher's `--` separator to
+choose the root model. Colony role files pin their own provider so a global
+gateway choice cannot accidentally reinterpret a role's model ID.
+
 For example, the generated agent entries can be changed to:
 
 ```json
@@ -201,6 +220,12 @@ a Kotlin Spring Boot service loads both `kotlin` and `spring-boot`, while a Java
 Spring Boot service loads only `spring-boot`. During `/implement`, Gorn rechecks
 the affected modules, rejects an omitted match, and loads every applicable skill
 before editing. Lee loads the same skills and checks for omissions during review.
+
+On first Codex launch, Coding Colony creates one symlink from
+`~/.agents/skills/coding-colony` to the central skill directory. Later launches
+reuse it, so reinstalling or updating the central setup updates every target
+repository without copying skills. The launcher stops without overwriting if a
+different file or directory already owns that exact registration path.
 
 ## Optional Integrations
 

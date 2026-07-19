@@ -57,14 +57,24 @@ Keep provider-specific model IDs out of role workflows. Provider defaults seed
 installed `coding-colony.json`; its `models.<harness>` mappings and
 `agents.<role>` tier/reasoning values are the user-facing configuration.
 
-Keep one central installation. Launch with central `CODEX_HOME`,
-`CLAUDE_CONFIG_DIR`, or `OPENCODE_CONFIG_DIR`, but keep the target repository as
-the harness workspace/cwd. Grant its central `docs/<project-slug>/` directory as
-the additional writable location.
+Keep one central installation. Claude Code and OpenCode launch with the central
+`CLAUDE_CONFIG_DIR` or `OPENCODE_CONFIG_DIR`. Codex must keep the user's active
+`CODEX_HOME`; bridge the central agents, additive hooks, required delegation
+settings, and namespaced MCP servers through invocation-scoped config, and
+expose the central skills through one idempotent
+`~/.agents/skills/coding-colony` symlink. Never copy, relocate, or rewrite user
+Codex config, auth, state, or sessions. Keep the target repository as the
+harness workspace/cwd and grant its central `docs/<project-slug>/` directory as
+the additional writable location. With no `--repo`, use the Coding Colony
+installation root (`AGENT_ROOT`); never infer the workspace from the caller's
+current directory.
 
 On every launch, validate `coding-colony.json` and synchronize only the selected
 harness's concrete model and reasoning fields. Do not add harness profiles,
 `.env` model keys, an OpenCode model-tier resolver, or model-refresh hooks.
+For Codex, the active user/project/system configuration owns the root model and
+provider; never inject `models.codex.default` as a CLI override. Colony tier and
+reasoning mappings apply to its named role files, whose provider must be pinned.
 
 Keep optional integrations optional. Generated prompts may say a plugin is
 enabled or disabled. Workflows that require a disabled or missing optional tool
