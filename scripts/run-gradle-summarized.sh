@@ -7,8 +7,13 @@ if [[ $# -lt 1 ]]; then
   exit 64
 fi
 
-repo_path="$1"
+requested_repo_path="$1"
 shift
+
+repo_path="$requested_repo_path"
+if [[ ! -x "$repo_path/gradlew" && -x "$PWD/gradlew" ]]; then
+  repo_path="$PWD"
+fi
 
 if [[ ! -d "$repo_path" ]]; then
   printf 'RESULT=ERROR\n'

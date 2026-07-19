@@ -329,6 +329,13 @@ the target repository yourself while `gorn` is working.
 If native delegation is unavailable, report that `gorn` could not be spawned;
 do not silently execute the workflow as the root agent."""
     else:
+        child_contract = (
+            "The spawned role owns the workflow and may spawn the `scout` agent for bounded, read-only "
+            "context gathering when that saves context-window tokens. Scout must not edit files or delegate again."
+            if role in {"milten", "lester"}
+            else f"The spawned `{role}` agent is the leaf executor: it must not invoke `/{command}`, delegate again, or\n"
+            "spawn another agent."
+        )
         delegation_contract = f"""Codex delegation contract: invoking `/{command}` is explicit authorization to
 delegate the complete task to the `{role}` custom agent. You are the
 orchestrator, not the workflow owner.
@@ -337,8 +344,8 @@ When native multi-agent tools are available, immediately call `spawn_agent` with
 `agent_type=\"{role}\"` and pass the user's full request, including these command
 arguments: `$ARGUMENTS`. Tell the spawned agent to execute the `{role}` workflow,
 make the requested changes, and run its focused verification. The spawned `{role}`
-agent is the leaf executor: it must not invoke `/{command}`, delegate again, or
-spawn another agent. Call `spawn_agent` exactly once, wait for that agent, then
+{child_contract} It must not invoke `/{command}`. Call `spawn_agent` exactly once,
+wait for that agent, then
 report its result. Do not inspect, edit, or verify the target repository
 yourself before delegation, and do not duplicate the delegated work.
 
@@ -1262,7 +1269,7 @@ def main() -> int:
     if not isinstance(command, str):
         return 0
     parsed = parse_gradle(command)
-    if not parsed or not re.search(r"(^|\s)(test|integrationTest|check)(\s|$)", parsed["args"]):
+    if not parsed or not re.search(r"(^|\s)(build|test|integrationTest|check)(\s|$)", parsed["args"]):
         return 0
     env = read_env(Path.cwd())
     wrapper = Path(env.get("AGENT_ROOT", str(Path.cwd()))) / ".config" / "bin" / "run-gradle-summarized.sh"
@@ -1393,7 +1400,7 @@ export const GradleWrapperRedirectPlugin = async ({ directory }) => ({
     const command = output?.args?.command;
     if (typeof command !== "string") return;
     const match = command.match(/(?:cd\s+(?<repo>[^&;]+?)\s*&&\s*)?\.\/gradlew\s+(?<args>.+)$/s);
-    if (!match?.groups?.args || !/(^|\s)(test|integrationTest|check)(\s|$)/.test(match.groups.args)) return;
+    if (!match?.groups?.args || !/(^|\s)(build|test|integrationTest|check)(\s|$)/.test(match.groups.args)) return;
     const repoPath = match.groups.repo?.trim().replace(/^['"]|['"]$/g, "") || process.env.AGENT_TARGET_REPO || output?.args?.cwd || directory;
     const wrapper = `${directory}/.config/bin/run-gradle-summarized.sh`;
     output.args.command = `zsh ${shellQuote(wrapper)} ${shellQuote(repoPath)} ${match.groups.args.trim()}`;

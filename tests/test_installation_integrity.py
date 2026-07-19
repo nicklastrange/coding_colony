@@ -155,6 +155,7 @@ class InstallationIntegrityTests(unittest.TestCase):
         self.assertIn("context-mode=enabled:", env["AGENT_OPTIONAL_DEPS"])
         self.assertTrue((agent_root / ".opencode" / "plugins" / "graphify.js").exists())
         self.assertTrue((agent_root / ".opencode" / "plugins" / "gradle-wrapper-redirect.js").exists())
+        self.assertIn("build|test|integrationTest|check", (agent_root / ".opencode" / "plugins" / "gradle-wrapper-redirect.js").read_text(encoding="utf-8"))
         config = json.loads((agent_root / ".opencode" / "opencode.json").read_text(encoding="utf-8"))
         self.assertEqual(config["mcp"]["context-mode"]["command"], ["context-mode"])
         self.assertEqual(config["mcp"]["playwright"]["command"], ["playwright-mcp"])
@@ -227,6 +228,34 @@ class InstallationIntegrityTests(unittest.TestCase):
         updated = output["hookSpecificOutput"]["updatedInput"]["command"]
         self.assertTrue(updated.endswith(f"{target_repo} test"))
         self.assertNotIn(f" {agent_root} test", updated)
+
+        build_result = subprocess.run(
+            [sys.executable, str(hook)],
+            cwd=agent_root,
+            input=json.dumps({"tool_input": {"command": "./gradlew build"}}),
+            check=True,
+            text=True,
+            capture_output=True,
+            env={**os.environ, "AGENT_TARGET_REPO": str(target_repo)},
+        )
+        build_updated = json.loads(build_result.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
+        self.assertTrue(build_updated.endswith(f"{target_repo} build"))
+
+    def test_gradle_summary_falls_back_to_shell_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            gradlew = repo / "gradlew"
+            gradlew.write_text("#!/bin/sh\nprintf '%s\\n' 'BUILD SUCCESSFUL'\n", encoding="utf-8")
+            gradlew.chmod(0o755)
+            result = subprocess.run(
+                [str(REPO_ROOT / "scripts" / "run-gradle-summarized.sh"), "/Users/mikolaj.cekut", "build"],
+                cwd=repo,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertIn("RESULT=SUCCESS", result.stdout)
+            self.assertIn(f"{repo}/gradlew", result.stdout)
 
     def test_reinstall_preserves_existing_model_env_overrides_without_explicit_provider(self) -> None:
         agent_root = self.install("--harness", "codex")
@@ -441,7 +470,12 @@ class InstallationIntegrityTests(unittest.TestCase):
             else:
                 self.assertIn(f'agent_type="{role}"', content)
                 self.assertIn(f"The spawned `{role}`", content)
-                self.assertIn("agent is the leaf executor", content)
+                if role in {"milten", "lester"}:
+                    self.assertIn("may spawn the `scout` agent", content)
+                    self.assertIn("context-window tokens", content)
+                    self.assertNotIn("leaf executor", content)
+                else:
+                    self.assertIn("agent is the leaf executor", content)
                 self.assertIn("Call `spawn_agent` exactly once", content)
             self.assertNotIn("agent:", content)
         bookskeeper = (agent_root / ".agents" / "skills" / "bookskeeper" / "SKILL.md").read_text(encoding="utf-8")
