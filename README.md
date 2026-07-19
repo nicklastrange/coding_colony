@@ -3,21 +3,21 @@
 Coding Colony is a portable set of AI development workflows for teams and solo
 developers who use Codex, Claude Code, or OpenCode.
 
-It gives each harness the same high-level commands for planning, design,
-implementation, review, verification, and repository documentation while still
-using each harness in its native format.
+It gives each harness the same high-level commands for product specification,
+task refinement, implementation planning, implementation, verification, and
+repository documentation while still using each harness in its native format.
 
 ## What You Get
 
 - One workflow pack for Codex, Claude Code, and OpenCode.
-- Slash-command workflows for `/spec`, `/refine`, `/analyze`, `/design`,
-  `/implement`, `/implement-spike`, `/verify`, and `/bookskeeper`.
+- Slash-command workflows for `/spec`, `/refine`, `/analyze`, `/implement`,
+  `/verify`, and `/bookskeeper`.
 - Role-based agents with clear responsibilities, such as planner, implementer,
-  reviewer, verifier, designer, and bookskeeper.
+  reviewer, verifier, Scout, and bookskeeper.
 - Portable project installs that keep machine-specific paths and secrets in
   `.env`.
-- Model tiers such as `fast`, `balanced`, `deep`, `design`, and `review` so
-  agent definitions stay provider-neutral.
+- Model tiers `fast`, `balanced`, `deep`, and `review` so agent definitions stay
+  provider-neutral.
 - Optional integrations for tools like Graphify, context-mode, Playwright MCP,
   and Gradle test summarization.
 - Install output that contains only runtime files, not the installer source.
@@ -31,8 +31,8 @@ Typical use cases:
 
 - Turn vague requests into refined implementation briefs.
 - Analyze a repository and create implementation plans grounded in real code.
-- Generate UI design systems and HTML mockups before implementation.
-- Implement plans with focused code changes and verification.
+- Implement plans with focused code changes, verification, and mandatory review
+  until the result passes or an external blocker is reached.
 - Review changes for bugs, regressions, missing tests, and project-rule
   violations.
 - Build or refresh repository guidance from a Graphify knowledge graph.
@@ -77,8 +77,8 @@ enabled harnesses, provider profile, model tier mappings, and optional tool
 status.
 
 The installer also writes one profile per selected harness (`codex.env`,
-`claude.env`, or `opencode.env`) and a `coding-colony` launcher. Add the
-Interactive installs ask whether to add the launcher directory to your shell's
+`claude.env`, or `opencode.env`) and a `coding-colony` launcher. Interactive
+installs ask whether to add the launcher directory to your shell's
 startup file. Use `--no-path-prompt` to skip that question. You can also add it
 manually to `PATH` to start a harness from a target repository:
 
@@ -93,11 +93,13 @@ prompt.
 
 Use `--repo PATH` when launching from another directory. The launcher activates
 the selected profile and passes the target repository to generated Gradle
-redirects.
+redirects. When using the launcher, edit the corresponding `codex.env`,
+`claude.env`, or `opencode.env`; it copies the selected profile to `.env`, so
+direct edits to `.env` are not durable across launches.
 
-`AGENT_MODEL_DEFAULT` controls the main/default Codex agent independently from
+`AGENT_MODEL_DEFAULT` controls the main/default harness agent independently from
 the role tiers. `AGENT_MODEL_FAST`, `AGENT_MODEL_BALANCED`, `AGENT_MODEL_DEEP`,
-`AGENT_MODEL_DESIGN`, and `AGENT_MODEL_REVIEW` control the specialized agents.
+and `AGENT_MODEL_REVIEW` control the specialized agents.
 
 If you use `direnv`, run this once from the installed directory:
 
@@ -151,11 +153,13 @@ workflows:
 - `fast`
 - `balanced`
 - `deep`
-- `design`
 - `review`
 
 By default, each harness uses its native provider profile. You only need
-`--provider` when you intentionally want a different provider or gateway.
+`--provider` when you intentionally want a compatible gateway. Profiles declare
+their supported harnesses, and the installer rejects combinations whose model
+IDs or transport cannot work there. The bundled LiteLLM and OpenRouter gateway
+profiles currently target Codex.
 
 Example with LiteLLM:
 
@@ -170,13 +174,14 @@ LITELLM_BASE_URL=http://localhost:4000
 LITELLM_API_KEY=...
 ```
 
-You can change concrete model IDs later by editing the `AGENT_MODEL_*` values in
-`.env`. OpenCode resolves those values when its configuration reloads. Codex
-refreshes its root config and custom agent files from `.env` at SessionStart, so
-restart Codex after changing them; reinstalling is not required. The generated
-TOML contains bootstrap values because Codex requires concrete model IDs in its
-custom-agent files. Generated workflow instructions remain provider-neutral and
-continue to identify agents by tier.
+You can change concrete model IDs later through the `AGENT_MODEL_*` values. Edit
+the harness-specific profile when using `coding-colony`, or `.env` when starting
+a harness directly from the installed setup. OpenCode resolves the active
+profile when its configuration reloads. Codex refreshes its root config and
+custom-agent files from the active `.env` at SessionStart, so restart Codex after
+changing them. Claude Code agent frontmatter requires concrete models; rerun the
+installer after changing its profile. Generated workflow instructions remain
+provider-neutral and continue to identify agents by tier.
 
 ## Optional Integrations
 
@@ -209,18 +214,34 @@ Optional tools are recorded in `.env`, so agents know whether a workflow can use
 them. If a required optional tool is missing, agents should report that clearly
 instead of pretending the tool ran.
 
+Scout remains available without Graphify as a fast, read-only agent for bounded
+file, symbol, caller, test, and configuration discovery. Graphify is optional
+for the other workflows but is a prerequisite for `/bookskeeper`.
+
 ## Commands
 
 The same command names are available across supported harnesses:
 
-- `/spec`: create or refresh a project specification.
-- `/refine`: turn a raw request into a refined task.
-- `/analyze`: inspect the repository and produce an implementation plan.
-- `/design`: create a visual design system and HTML mockups.
-- `/implement`: implement a plan and verify the result.
-- `/implement-spike`: run a bounded technical spike.
-- `/verify`: check an implementation against the plan and tests.
-- `/bookskeeper`: generate repository guidance from Graphify output.
+- `/spec`: create or refresh the product-level project specification.
+- `/refine`: turn a raw request into a business-focused task that ends in
+  `READY` or `NEEDS_INPUT`.
+- `/analyze`: produce an evidence-backed, traceable implementation and review
+  plan that ends in `READY` or `BLOCKED`.
+- `/implement`: implement a ready plan, verify it, and repeat the Lee review and
+  remediation loop until `PASS` or an external blocker. Changes that can affect
+  application wiring, configuration, dependencies, or runtime initialization
+  require startup/bootstrap evidence.
+- `/verify`: independently check an implementation against requirements, the
+  plan, repository evidence, and tests.
+- `/bookskeeper`: initialize or incrementally refresh Graphify-backed repository
+  guidance. Repository-changing workflows use `graphify-out/needs_update` to
+  signal stale knowledge; Bookskeeper runs the cheap `graphify update <repo>`
+  freshness gate for every existing graph, uses the marker to narrow document
+  work, and clears it only after success.
+
+Rhobar, Milten, Lester, and Xardas may use Scout for cheap bounded discovery;
+the parent agent still owns and validates the conclusion. The same six command
+bindings are generated for Codex, Claude Code, and OpenCode.
 
 ## Generated Files
 

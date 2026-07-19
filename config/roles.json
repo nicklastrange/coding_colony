@@ -15,7 +15,7 @@
   },
   "milten": {
     "description": "Task refiner. Turns raw work requests into actionable refined task specs.",
-    "tier": "deep",
+    "tier": "balanced",
     "effort": "high",
     "sandbox": "workspace-write",
     "summary": "Clarify scope, requirements, acceptance criteria, constraints, dependencies, and open questions."
@@ -27,20 +27,6 @@
     "sandbox": "workspace-write",
     "summary": "Analyze actual code and tests, surface material uncertainties, then write concrete implementation plans."
   },
-  "nadia": {
-    "description": "UX designer. Creates visual design systems and high-fidelity HTML/CSS mockups.",
-    "tier": "design",
-    "effort": "medium",
-    "sandbox": "workspace-write",
-    "summary": "Produce polished HTML design tokens, components, and screen mockups without writing production app code."
-  },
-  "riordian": {
-    "description": "Spike agent. Performs bounded research, analysis, and proof-of-concept coordination.",
-    "tier": "deep",
-    "effort": "high",
-    "sandbox": "workspace-write",
-    "summary": "Run technical spikes, document findings, and keep POCs isolated and reversible."
-  },
   "gorn": {
     "description": "Implementer. Applies code changes precisely from a plan and verifies them.",
     "tier": "balanced",
@@ -51,7 +37,7 @@
   "lee": {
     "description": "Code reviewer. Performs read-only review for bugs, regressions, and missing tests.",
     "tier": "review",
-    "effort": "medium",
+    "effort": "high",
     "sandbox": "read-only",
     "summary": "Review changed files first, report findings by severity, and do not edit files."
   },
@@ -64,10 +50,9 @@
   },
   "xardas": {
     "description": "Bookskeeper. Generates graph-backed repository guidance.",
-    "tier": "deep",
-    "effort": "medium",
+    "tier": "balanced",
+    "effort": "high",
     "sandbox": "workspace-write",
     "summary": "Use Graphify when enabled to generate concise repo rules and detailed guidance docs."
   }
 }
-

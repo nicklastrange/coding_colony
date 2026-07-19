@@ -23,9 +23,7 @@ COMMAND_TO_ROLE = {
     "spec": "rhobar",
     "refine": "milten",
     "analyze": "lester",
-    "design": "nadia",
     "implement": "gorn",
-    "implement-spike": "riordian",
     "verify": "gomez",
     "bookskeeper": "xardas",
 }
@@ -34,8 +32,6 @@ ROLE_ORDER = (
     "rhobar",
     "milten",
     "lester",
-    "nadia",
-    "riordian",
     "gorn",
     "lee",
     "gomez",
@@ -85,6 +81,17 @@ def write_file(path: Path, content: str, dry_run: bool, mode: int | None = None)
         path.chmod(mode)
 
 
+def remove_path(path: Path, dry_run: bool) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if dry_run:
+        print(f"remove {path}")
+    elif path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
 def same_path(left: Path, right: Path) -> bool:
     try:
         return left.resolve() == right.resolve()
@@ -115,17 +122,21 @@ def copy_tree(src: Path, dst: Path, dry_run: bool) -> None:
     shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 
-def parse_env(path: Path) -> dict[str, str]:
+def parse_env_content(content: str) -> dict[str, str]:
     values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in content.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
+def parse_env(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    return parse_env_content(path.read_text(encoding="utf-8"))
 
 
 def env_content(
@@ -148,7 +159,6 @@ def env_content(
         "AGENT_MODEL_FAST": model_tiers["fast"],
         "AGENT_MODEL_BALANCED": model_tiers["balanced"],
         "AGENT_MODEL_DEEP": model_tiers["deep"],
-        "AGENT_MODEL_DESIGN": model_tiers["design"],
         "AGENT_MODEL_REVIEW": model_tiers["review"],
         "AGENT_PLUGINS": ",".join(plugins),
         "AGENT_OPTIONAL_DEPS": serialize_optional_deps(optional_deps),
@@ -277,6 +287,7 @@ def role_prompt(role_name: str, role: dict, plugins: list[str], workflows: dict[
         if "graphify" in plugins
         else "Graphify is optional and not enabled for this install; if a workflow requires graphify, report the missing optional dependency instead of fabricating graph-backed output."
     )
+    shared_instructions = (repo_root() / "core" / "shared-instructions.md").read_text(encoding="utf-8").strip()
     return f"""You are {role_name}, {role['description']}
 
 Primary responsibility: {role['summary']}
@@ -287,12 +298,7 @@ Install context:
 - Enabled optional plugins: {enabled_plugins}
 - {graph_line}
 
-Shared rules:
-- Read repo-local AGENTS.md first when present.
-- Keep changes narrow and tied to the user request.
-- Prefer rg, rg --files, and bounded file reads.
-- Use ROOT_DIR and AGENT_ROOT from the generated environment, not hardcoded paths.
-- Keep project-scoped docs under AGENT_ROOT/docs/<project-slug>/; repository-owned guidance remains in the target repository.
+{shared_instructions}
 
 Role workflow:
 {workflow}
@@ -308,56 +314,47 @@ Repository or task arguments: $ARGUMENTS
 """
 
 
-def codex_skill_content(command: str, role: str, workflows: dict[str, str]) -> str:
+def codex_skill_content(command: str, role: str) -> str:
     if role == "gorn":
-        delegation_contract = f"""Codex delegation contract: invoking `/{command}` is explicit authorization to
-delegate the complete task to the `gorn` custom agent. You are the launcher;
-`gorn` owns implementation, review coordination, remediation, and verification.
-
-When native multi-agent tools are available, spawn exactly one `gorn` agent with
-the user's full request and these command arguments: `$ARGUMENTS`. Prefer
-`send_input` or `resume_agent` when an existing `gorn` agent from this workflow
-can continue the work. Do not spawn duplicate implementation agents.
-
-Tell `gorn` to execute the workflow directly, then launch `lee` for review when
-the plan or user requests review. `gorn` must wait for Lee, apply blocker/major
-findings, and rerun the plan's verification. `gorn` may spawn `lee`, but must
-not invoke `/{command}` again or spawn another `gorn`. Wait for the existing
-`gorn` workflow to finish and report its result. Do not inspect, edit, or verify
-the target repository yourself while `gorn` is working.
-
-If native delegation is unavailable, report that `gorn` could not be spawned;
-do not silently execute the workflow as the root agent."""
+        delegation_contract = """Delegate to exactly one `gorn` custom agent. Call `spawn_agent` exactly once with
+`agent_type="gorn"` and pass the user's full request plus `$ARGUMENTS`. The
+canonical `gorn` role workflow owns implementation, its mandatory `lee` review/remediation loop,
+and verification.
+Wait for `gorn` and report its result; do not inspect, edit, verify, or duplicate
+its work. If native delegation is unavailable, report that and stop."""
     else:
         child_contract = (
-            "The spawned role owns the workflow and may spawn the `scout` agent for bounded, read-only "
-            "context gathering when that saves context-window tokens. Scout must not edit files or delegate again."
-            if role in {"milten", "lester"}
-            else f"The spawned `{role}` agent is the leaf executor: it must not invoke `/{command}`, delegate again, or\n"
-            "spawn another agent."
+            f"The spawned `{role}` agent may spawn at most one `scout` child for bounded, read-only discovery; no other children."
+            if role in {"rhobar", "milten", "lester", "xardas"}
+            else f"The spawned `{role}` agent is a leaf executor and must not spawn children."
         )
-        delegation_contract = f"""Codex delegation contract: invoking `/{command}` is explicit authorization to
-delegate the complete task to the `{role}` custom agent. You are the
-orchestrator, not the workflow owner.
-
-When native multi-agent tools are available, immediately call `spawn_agent` with
-`agent_type=\"{role}\"` and pass the user's full request, including these command
-arguments: `$ARGUMENTS`. Tell the spawned agent to execute the `{role}` workflow,
-make the requested changes, and run its focused verification. The spawned `{role}`
-{child_contract} It must not invoke `/{command}`. Call `spawn_agent` exactly once,
-wait for that agent, then
-report its result. Do not inspect, edit, or verify the target repository
-yourself before delegation, and do not duplicate the delegated work.
-
-If native delegation is unavailable, report that `{role}` could not be spawned;
-do not silently execute the workflow as the root agent."""
+        delegation_contract = f"""Delegate to the `{role}` custom agent. Call `spawn_agent` exactly once with
+`agent_type="{role}"` and pass the user's full request plus `$ARGUMENTS`. The
+canonical `{role}` role workflow owns the task.
+{child_contract} Wait for `{role}` and report its result; do not inspect, edit,
+verify, or duplicate its work. If native delegation is unavailable, report that
+and stop."""
     return f"""---
+name: {command}
 description: Run /{command} through the {role} role workflow.
 ---
 
 {delegation_contract}
+"""
 
-{workflows[role]}
+
+def claude_skill_content(command: str, role: str) -> str:
+    return f"""---
+name: {command}
+description: Run /{command} through the {role} role workflow.
+context: fork
+agent: {role}
+disable-model-invocation: true
+---
+
+Run the canonical `{role}` workflow for this task:
+
+$ARGUMENTS
 """
 
 
@@ -365,6 +362,7 @@ def opencode_command_content(command: str, role: str) -> str:
     return f"""---
 description: Run /{command} through the {role} role workflow.
 agent: {role}
+subtask: true
 ---
 
 {command_body(command, role)}
@@ -737,6 +735,20 @@ def provider_for_harness(harness: str, explicit_provider: str | None) -> str:
     return explicit_provider or NATIVE_PROVIDER_BY_HARNESS[harness]
 
 
+def validate_provider_harnesses(provider_name: str | None, harnesses: list[str], providers: dict) -> None:
+    if not provider_name:
+        return
+    if provider_name not in providers:
+        raise SystemExit(f"Unknown provider profile: {provider_name}")
+    supported = providers[provider_name]["supported_harnesses"]
+    unsupported = [harness for harness in harnesses if harness not in supported]
+    if unsupported:
+        raise SystemExit(
+            f"Provider profile `{provider_name}` does not support harness(es): {', '.join(unsupported)}. "
+            f"Supported harnesses: {', '.join(supported)}"
+        )
+
+
 def generate_base(
     agent_root: Path,
     root_dir: Path,
@@ -794,25 +806,43 @@ def generate_profiles(
     providers: dict,
     plugins: list[str],
     optional_deps: dict[str, dict[str, str]],
+    shared_env: dict[str, str],
     dry_run: bool,
-) -> None:
+) -> dict[str, dict[str, str]]:
+    generated: dict[str, dict[str, str]] = {}
     for harness in harnesses:
         provider_name = provider_for_harness(harness, explicit_provider)
+        provider = providers[provider_name]
         existing_profile = parse_env(agent_root / f"{harness}.env")
+        if len(harnesses) == 1:
+            for key in ("AGENT_MODEL_DEFAULT", *(tier_env_name(tier) for tier in provider["tiers"])):
+                tier = key.removeprefix("AGENT_MODEL_").lower()
+                provider_value = (
+                    default_model_for_provider(provider)
+                    if tier == "default"
+                    else provider["tiers"][tier]
+                )
+                if existing_profile.get(key) and existing_profile[key] != provider_value:
+                    continue
+                if shared_env.get(key):
+                    existing_profile[key] = shared_env[key]
+        content = profile_env_content(
+            agent_root,
+            root_dir,
+            harness,
+            provider_name,
+            provider,
+            plugins,
+            optional_deps,
+            existing_profile,
+        )
         write_file(
             agent_root / f"{harness}.env",
-            profile_env_content(
-                agent_root,
-                root_dir,
-                harness,
-                provider_name,
-                providers[provider_name],
-                plugins,
-                optional_deps,
-                existing_profile,
-            ),
+            content,
             dry_run,
         )
+        generated[harness] = parse_env_content(content)
+    return generated
 
 
 def envrc_content() -> str:
@@ -912,7 +942,7 @@ def generate_codex(agent_root: Path, provider: dict, roles: dict, plugins: list[
 
     skills_dir = agent_root / ".agents" / "skills"
     for command, role in COMMAND_TO_ROLE.items():
-        write_file(skills_dir / command / "SKILL.md", codex_skill_content(command, role, workflows), dry_run)
+        write_file(skills_dir / command / "SKILL.md", codex_skill_content(command, role), dry_run)
 
 
 def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list[str], workflows: dict[str, str], env: dict[str, str], dry_run: bool) -> None:
@@ -920,18 +950,31 @@ def generate_claude(agent_root: Path, provider: dict, roles: dict, plugins: list
     mkdir(claude_dir / "agents", dry_run)
     for role_name in ROLE_ORDER:
         role = roles[role_name]
-        content = "\n".join([
+        frontmatter = [
             "---",
             f"name: {role_name}",
             f"description: {role['description']}",
+            f"model: {env.get(tier_env_name(role['tier']), tier_model(provider, role))}",
+            f"effort: {role['effort']}",
             f"x-agent-tier: {role['tier']}",
+        ]
+        if role["sandbox"] == "read-only":
+            frontmatter.extend(["permissionMode: plan", "disallowedTools: Write, Edit"])
+        content = "\n".join([
+            *frontmatter,
             "---",
             "",
             role_prompt(role_name, role, plugins, workflows),
         ])
         write_file(claude_dir / "agents" / f"{role_name}.md", content, dry_run)
+    for command, role in COMMAND_TO_ROLE.items():
+        write_file(
+            claude_dir / "skills" / command / "SKILL.md",
+            claude_skill_content(command, role),
+            dry_run,
+        )
     settings = {
-        "model": env.get("AGENT_MODEL_DEFAULT", provider.get("default_model", provider["tiers"]["balanced"])),
+        "model": env.get("AGENT_MODEL_DEFAULT", default_model_for_provider(provider)),
         "permissions": {
             "allow": ["Bash(rg:*)", "Bash(sed:*)", "Bash(find:*)", "Bash(git status:*)"],
             "deny": ["Bash(git reset --hard:*)", "Bash(git checkout --:*)"]
@@ -948,12 +991,20 @@ def generate_opencode(agent_root: Path, provider: dict, roles: dict, plugins: li
     mkdir(opencode_dir / "commands", dry_run)
     for role_name in ROLE_ORDER:
         role = roles[role_name]
+        child = "scout" if role_name in {"rhobar", "milten", "lester", "xardas"} else "lee" if role_name == "gorn" else None
+        permissions = ["permission:"]
+        if role["sandbox"] == "read-only":
+            permissions.extend(["  edit: deny", "  bash: deny"])
+        permissions.extend(["  task:", '    "*": deny'])
+        if child:
+            permissions.append(f"    {child}: allow")
         content = "\n".join([
             "---",
             f"description: {role['description']}",
             f"model: {role['tier']}",
             f"x-agent-tier: {role['tier']}",
-            "mode: all",
+            "mode: subagent",
+            *permissions,
             "---",
             "",
             role_prompt(role_name, role, plugins, workflows),
@@ -997,8 +1048,7 @@ def generate(
     plugin_defs = read_json(repo_root() / "config" / "plugins.json")
     roles = read_json(repo_root() / "config" / "roles.json")
     workflows = read_role_workflows()
-    if explicit_provider and explicit_provider not in providers:
-        raise SystemExit(f"Unknown provider profile: {explicit_provider}")
+    validate_provider_harnesses(explicit_provider, harnesses, providers)
     selected_provider_label = provider_label(harnesses, explicit_provider)
     env = parse_env(agent_root / ".env")
     default_provider_name = explicit_provider
@@ -1025,21 +1075,50 @@ def generate(
         "AGENT_MODEL_FAST": model_tiers["fast"],
         "AGENT_MODEL_BALANCED": model_tiers["balanced"],
         "AGENT_MODEL_DEEP": model_tiers["deep"],
-        "AGENT_MODEL_DESIGN": model_tiers["design"],
         "AGENT_MODEL_REVIEW": model_tiers["review"],
     })
 
+    for relative_path in (
+        ".codex/agents/nadia.toml",
+        ".codex/agents/riordian.toml",
+        ".agents/skills/design",
+        ".agents/skills/implement-spike",
+        ".claude/agents/nadia.md",
+        ".claude/agents/riordian.md",
+        ".claude/skills/design",
+        ".claude/skills/implement-spike",
+        ".opencode/agents/nadia.md",
+        ".opencode/agents/riordian.md",
+        ".opencode/commands/design.md",
+        ".opencode/commands/implement-spike.md",
+    ):
+        remove_path(agent_root / relative_path, dry_run)
+
     generate_base(agent_root, root_dir, harnesses, selected_provider_label, default_model, model_tiers, plugins, optional_deps, dry_run)
-    generate_profiles(agent_root, root_dir, harnesses, explicit_provider, providers, plugins, optional_deps, dry_run)
+    profiles = generate_profiles(
+        agent_root,
+        root_dir,
+        harnesses,
+        explicit_provider,
+        providers,
+        plugins,
+        optional_deps,
+        env,
+        dry_run,
+    )
     for harness in harnesses:
         provider_name = provider_for_harness(harness, explicit_provider)
         provider = providers[provider_name]
+        harness_env = dict(env)
+        for key in ("AGENT_MODEL_DEFAULT", *(tier_env_name(tier) for tier in provider["tiers"])):
+            if profiles[harness].get(key):
+                harness_env[key] = profiles[harness][key]
         if harness == "codex":
-            generate_codex(agent_root, provider, roles, plugins, workflows, env, dry_run)
+            generate_codex(agent_root, provider, roles, plugins, workflows, harness_env, dry_run)
         elif harness == "claude":
-            generate_claude(agent_root, provider, roles, plugins, workflows, env, dry_run)
+            generate_claude(agent_root, provider, roles, plugins, workflows, harness_env, dry_run)
         elif harness == "opencode":
-            generate_opencode(agent_root, provider, roles, plugins, workflows, env, dry_run)
+            generate_opencode(agent_root, provider, roles, plugins, workflows, harness_env, dry_run)
 
 
 def resolve_install(args: argparse.Namespace) -> tuple[Path, Path]:
@@ -1061,7 +1140,7 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--global", dest="global_install", action="store_true", help="Install/generate under ~/.agent-v2.")
     parser.add_argument("--root-dir", help="Workspace root containing target repositories. Defaults to parent of portable path.")
     parser.add_argument("--harness", action="append", help="Harness to generate: codex, claude, opencode. Repeat or comma-separate.")
-    parser.add_argument("--provider", help="Provider profile from config/providers.json. Defaults to the native provider for each selected harness.")
+    parser.add_argument("--provider", help="Compatible provider profile from config/providers.json. Defaults to each harness's native provider.")
     parser.add_argument("--plugin", action="append", help="Optional plugin to enable. Repeat or comma-separate.")
     parser.add_argument("--no-plugin-prompt", action="store_true", help="Do not ask about optional plugins when --plugin is omitted.")
     parser.add_argument("--install-missing-plugins", action="store_true", help="Install missing optional plugin dependencies that have configured install commands.")
@@ -1073,6 +1152,11 @@ def main(argv: list[str]) -> int:
     explicit_harness = bool(args.harness)
     requested_harnesses = split_csv(args.harness) or list(SUPPORTED_HARNESSES)
     harnesses = validate_harnesses(requested_harnesses, explicit_harness, args.no_strict)
+    validate_provider_harnesses(
+        args.provider,
+        harnesses,
+        read_json(repo_root() / "config" / "providers.json"),
+    )
     plugin_defs = read_json(repo_root() / "config" / "plugins.json")
     requested_plugins = split_csv(args.plugin)
     prompt_for_plugins = not requested_plugins and not args.no_plugin_prompt and not args.dry_run and sys.stdin.isatty()
@@ -1422,7 +1506,6 @@ const TIER_ENV = {
   fast: "AGENT_MODEL_FAST",
   balanced: "AGENT_MODEL_BALANCED",
   deep: "AGENT_MODEL_DEEP",
-  design: "AGENT_MODEL_DESIGN",
   review: "AGENT_MODEL_REVIEW",
 };
 

@@ -25,21 +25,30 @@ The setup exposes the same high-level workflows across supported harnesses:
 - `/spec` -> `rhobar`
 - `/refine` -> `milten`
 - `/analyze` -> `lester`
-- `/design` -> `nadia`
 - `/implement` -> `gorn`
-- `/implement-spike` -> `riordian`
 - `/verify` -> `gomez`
 - `/bookskeeper` -> `xardas`
 
-Harnesses differ in how they launch subagents. Generated harness files should
-use native delegation/configuration where available and fall back to clear
-instructions where a harness has no direct equivalent.
+`/refine` ends in `READY` or `NEEDS_INPUT`; `/analyze` ends in `READY` or
+`BLOCKED`. `/implement` must delegate review to Lee and repeat remediation,
+verification, and review until Lee returns `PASS` or an external blocker is
+reported. Verification must include runnable startup/bootstrap evidence when
+the change can affect application wiring, configuration, dependencies, or
+runtime initialization.
+
+Scout is the cheap, read-only repository evidence agent. Rhobar, Milten,
+Lester, and Xardas may delegate bounded discovery to Scout while retaining
+responsibility for conclusions. Harnesses differ in how they launch subagents,
+but all six command bindings must exist in Codex, Claude Code, and OpenCode and
+must preserve these contracts.
 
 ## Repository Rules
 
 - Read `llms.txt` before changing installer behavior, generated harness files,
   roles, commands, providers, plugins, or documentation structure.
 - Read a target repository's local `AGENTS.md` first when present.
+- Treat `core/shared-instructions.md` as the source of truth for behavior shared
+  by every role; render it instead of duplicating shared rules in generators.
 - Keep generated task documents under `AGENT_ROOT/docs/<project-slug>/`.
 - Keep repository-owned guidance in the target repository, such as
   `graphify-out/*` and repo-local `AGENTS.md`.
@@ -49,7 +58,10 @@ instructions where a harness has no direct equivalent.
 
 ## Optional Graph Workflows
 
-Graphify support is optional. When the `graphify` plugin is enabled and a target
-repository has `graphify-out/graph.json`, use graph queries before broad source
-exploration. If Graphify is not installed or no graph exists, fall back to normal
-bounded repository inspection.
+Graphify support is optional for general discovery but required by
+`/bookskeeper`. When enabled and `graphify-out/graph.json` exists, query it
+before broad source exploration. Repository-changing workflows mark
+`graphify-out/needs_update` when knowledge may be stale. `/bookskeeper` runs the
+cheap `graphify update <repo>` freshness gate for every existing graph, uses the
+marker to narrow documentation work, clears it only after a successful refresh,
+and performs a deep build only when no graph exists.

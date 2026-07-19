@@ -19,8 +19,8 @@ files must stay in this repository.
 - Role: a named workflow agent, such as `xardas`, `gorn`, `lester`, or `lee`.
 - Command: a slash workflow such as `/bookskeeper` or `/implement`.
 - Provider: a model provider profile from `config/providers.json`.
-- Tier: a provider-neutral model label: `fast`, `balanced`, `deep`, `design`,
-  or `review`. The root/default agent has its separate `default` model mapping.
+- Tier: a provider-neutral model label: `fast`, `balanced`, `deep`, or `review`.
+  The root/default agent has its separate `default` model mapping.
 - Plugin: an optional integration from `config/plugins.json`, such as Graphify
   or context-mode.
 - Installed setup: the generated runtime folder produced by `install.sh`.
@@ -30,6 +30,7 @@ files must stay in this repository.
 - `scripts/agent_setup.py`: installer and renderer for all generated runtime
   files, including harness profiles and the `coding-colony` launcher.
 - `config/roles.json`: role metadata, tier, effort, sandbox, and summary.
+- `core/shared-instructions.md`: behavioral rules rendered into every role.
 - `core/role-workflows.md`: canonical role workflow bodies. Add or modify role
   behavior here first.
 - `config/providers.json`: provider profiles and concrete model mappings.
@@ -41,9 +42,10 @@ files must stay in this repository.
 
 ## Architecture Rules
 
-Keep role behavior harness-neutral. Put role workflow content in
-`core/role-workflows.md`, not directly in generated Codex, Claude, or OpenCode
-templates.
+Keep role behavior harness-neutral. Put shared behavior in
+`core/shared-instructions.md` and role-specific behavior in
+`core/role-workflows.md`; render both instead of duplicating either in generated
+Codex, Claude, or OpenCode templates.
 
 Keep harness-specific logic in `scripts/agent_setup.py`. Harness-specific logic
 includes frontmatter, config format, MCP format, model resolution, plugin hooks,
@@ -61,6 +63,32 @@ Do not copy installer source files into installed projects. Runtime installs
 should not contain source `install.sh`, `scripts/agent_setup.py`, `config/**`, or
 `core/**`.
 
+## Workflow Contracts
+
+The public command set is `/spec`, `/refine`, `/analyze`, `/implement`,
+`/verify`, and `/bookskeeper`. Every command must have a native binding in
+Codex, Claude Code, and OpenCode.
+
+- Milten returns `READY` or `NEEDS_INPUT` and keeps refined tasks focused on the
+  business problem, observable behavior, scope, constraints, and acceptance
+  criteria rather than implementation design.
+- Lester returns `READY` or `BLOCKED`. A ready plan traces every requirement to
+  repository evidence, file/symbol changes, tests, expected signals, and strict
+  Lee review checks; it contains no unresolved material implementation choice.
+- Gorn implements a ready plan and must delegate to Lee. A failing review starts
+  another remediation, verification, and review cycle until Lee returns `PASS`
+  or Gorn reports an external blocker. Changes with runtime-wiring risk require
+  runnable startup/bootstrap evidence, not compilation alone.
+- Scout is fast, low-effort, and read-only. Rhobar, Milten, Lester, and Xardas
+  may use it for bounded repository discovery, but the parent validates all
+  critical evidence and owns the output.
+- Graphify is optional for general discovery and required for `/bookskeeper`.
+  Repository-changing workflows mark `graphify-out/needs_update` when graph or
+  guidance knowledge may be stale. Xardas runs `graphify update <repo>` for
+  every existing graph, uses the marker to narrow documentation work, and
+  clears it only after a successful refresh; it uses a deep build only when no
+  graph exists.
+
 ## Adding A New Role
 
 1. Add the role to `config/roles.json`.
@@ -76,8 +104,8 @@ should not contain source `install.sh`, `scripts/agent_setup.py`, `config/**`, o
 
 1. Add the command-to-role mapping to `COMMAND_TO_ROLE`.
 2. Ensure the target role has a workflow in `core/role-workflows.md`.
-3. Verify generated command files for Codex and OpenCode bind to the correct
-   role.
+3. Verify generated command files for Codex, Claude Code, and OpenCode bind to
+   the correct role.
 4. Update README command documentation if user-facing.
 5. Add test assertions for command binding.
 
@@ -94,10 +122,14 @@ should not contain source `install.sh`, `scripts/agent_setup.py`, `config/**`, o
 ## Adding A New Provider
 
 1. Add a profile to `config/providers.json`.
-2. Provide all model tiers: `fast`, `balanced`, `deep`, `design`, and `review`.
-3. Add gateway fields when needed, such as base URL and API key env vars.
-4. Update `.env.example` when new env vars are required.
-5. Run the installer tests. They generate installs for every provider.
+2. Declare `supported_harnesses`; list only harnesses that can resolve both the
+   profile's model IDs and provider transport.
+3. Provide all model tiers: `fast`, `balanced`, `deep`, and `review`. Keep the
+   review model at least as capable as the deep model.
+4. Add gateway fields when needed, such as base URL and API key env vars.
+5. Update `.env.example` when new env vars are required.
+6. Run the installer tests. They generate every supported provider/harness
+   combination and reject incompatible combinations.
 
 ## Adding A New Optional Plugin
 
@@ -126,9 +158,18 @@ Changing `.env` model values is picked up on OpenCode config reload or restart.
 Do not promise live model hot-swapping inside an already-running session unless
 OpenCode itself guarantees it.
 
+OpenCode role agents must be `mode: subagent`; command files must set
+`subtask: true`. Encode read-only and delegation boundaries in native
+permissions instead of relying only on prose.
+
 ## Bookskeeper Contract
 
 `/bookskeeper` must use the `xardas` workflow.
+
+The Graphify plugin must be enabled and operational. If no graph exists, Xardas
+creates a deep graph. For every existing graph, Xardas runs `graphify update
+<repo>` before deriving guidance. `graphify-out/needs_update` narrows the
+document refresh and is removed only after successful graph and document work.
 
 Expected repository-owned outputs are:
 
@@ -162,6 +203,8 @@ plugin file in a temporary install or target install.
 
 - Generated agents contain summaries but not real workflows: check
   `core/role-workflows.md` parsing and `role_prompt()` usage.
+- Shared rules differ between roles: ensure `role_prompt()` renders
+  `core/shared-instructions.md` rather than a hardcoded copy.
 - Hardcoded provider models appear in agent files: check tier rendering and
   provider resolution.
 - Optional tools are assumed when disabled: check plugin-conditional prompt
@@ -175,6 +218,8 @@ plugin file in a temporary install or target install.
 - Installed folders contain source installer files: check copy/generation logic.
 - OpenCode command delegates to the right agent but uses the wrong model: check
   generated tier frontmatter, `.env` model values, and `model-tier-resolver.js`.
+- A harness is missing a command: verify all six bindings, including Claude
+  `.claude/skills/<command>/SKILL.md` files.
 
 ## Maintenance Principles
 
