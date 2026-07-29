@@ -932,6 +932,7 @@ for path in (root / "agents").glob("*.md"):
             self.assertIn(f'model = "{provider["tiers"][role["tier"]]}"', content)
             self.assertIn(f'model_reasoning_effort = "{role["effort"]}"', content)
             self.assertIn(f'sandbox_mode = "{role["sandbox"]}"', content)
+            self.assertIn(f"Never spawn another {role_name} agent", content)
             if provider.get("codex_provider"):
                 provider_id = f'coding_colony_{provider["codex_provider"]["id"]}'
                 self.assertIn(f'model_provider = "{provider_id}"', content)
@@ -957,6 +958,7 @@ for path in (root / "agents").glob("*.md"):
                 self.assertIn("Call `spawn_agent` exactly once", content)
                 self.assertIn("one `gorn` custom agent", content)
                 self.assertIn('agent_type="gorn"', content)
+                self.assertIn("must not spawn another gorn", content)
                 self.assertIn("mandatory lee review/remediation loop", content.replace("`", "").lower())
                 self.assertIn("verification", content)
             else:

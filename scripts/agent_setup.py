@@ -346,6 +346,17 @@ def role_prompt(role_name: str, role: dict, plugins: list[str], workflows: dict[
         if "graphify" in plugins
         else "Graphify is optional and not enabled for this install; if a workflow requires graphify, report the missing optional dependency instead of fabricating graph-backed output."
     )
+    allowed_children = {
+        "rhobar": "scout",
+        "milten": "scout",
+        "lester": "scout",
+        "gorn": "lee",
+        "xardas": "scout",
+    }.get(role_name, "none")
+    delegation_boundary = f"""Delegation boundary:
+This is a child-role invocation. Never spawn another {role_name} agent or invoke
+the same role workflow recursively. Only spawn the explicitly allowed child role
+{allowed_children} when the workflow requires it; otherwise do not spawn children."""
     shared_instructions = (repo_root() / "core" / "shared-instructions.md").read_text(encoding="utf-8").strip()
     return f"""You are {role_name}, {role['description']}
 
@@ -356,6 +367,8 @@ Install context:
 - {graph_line}
 
 {shared_instructions}
+
+{delegation_boundary}
 
 Role workflow:
 {workflow}
@@ -377,6 +390,7 @@ def codex_skill_content(command: str, role: str) -> str:
 `agent_type="gorn"` and pass the user's full request plus `$ARGUMENTS`. The
 canonical `gorn` role workflow owns implementation, its mandatory `lee` review/remediation loop,
 and verification.
+The spawned gorn must not spawn another gorn or invoke /implement recursively.
 Wait for `gorn` and report its result; do not inspect, edit, verify, or duplicate
 its work. If native delegation is unavailable, report that and stop."""
     else:
